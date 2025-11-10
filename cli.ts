@@ -68,6 +68,11 @@ const BLOCKCHAIN_GAS_COST_PER_PROPERTY = 0.0013;
 const TOTAL_COST_PER_PROPERTY = STORAGE_COST_PER_PROPERTY + AWS_COMPUTE_COST_PER_PROPERTY + BLOCKCHAIN_GAS_COST_PER_PROPERTY;
 const COST_PER_TOKEN = TOTAL_COST_PER_PROPERTY / TOKENS_PER_PROPERTY;
 
+// Labor constants
+const PROPERTIES_PER_COUNTY = 56708.373011800926;
+const COST_PER_PERSON_PER_WEEK = 2500;
+const MAX_PEOPLE_PER_WEEK = 5;
+
 interface CalculationResult {
   properties: number;
   tokens: number;
@@ -76,8 +81,42 @@ interface CalculationResult {
     storage: number;
     awsCompute: number;
     blockchainGas: number;
+    labor: number;
     total: number;
   };
+  timeline: {
+    counties: number;
+    weeks: number;
+    peoplePerWeek: number[];
+  };
+}
+
+function calculateLabor(properties: number): { laborCost: number; counties: number; weeks: number; peoplePerWeek: number[] } {
+  const counties = properties / PROPERTIES_PER_COUNTY;
+
+  let remainingCounties = counties;
+  let totalPeople = 0;
+  let weeks = 0;
+  const peoplePerWeek: number[] = [];
+  let laborCost = 0;
+
+  // People accumulate: each week we can add up to 5 new people
+  // Week 1: 5 people, Week 2: 10 people, Week 3: 15 people, etc.
+  while (remainingCounties > 0) {
+    weeks++;
+    // Add up to 5 new people this week
+    totalPeople += MAX_PEOPLE_PER_WEEK;
+    peoplePerWeek.push(totalPeople);
+
+    // Each person can do 1 county per week
+    const countiesDoneThisWeek = Math.min(totalPeople, remainingCounties);
+    remainingCounties -= countiesDoneThisWeek;
+
+    // Cost is based on total people working this week
+    laborCost += totalPeople * COST_PER_PERSON_PER_WEEK;
+  }
+
+  return { laborCost, counties, weeks, peoplePerWeek };
 }
 
 function calculateFromTokens(tokens: number): CalculationResult {
@@ -85,7 +124,8 @@ function calculateFromTokens(tokens: number): CalculationResult {
   const storageCost = properties * STORAGE_COST_PER_PROPERTY;
   const awsComputeCost = properties * AWS_COMPUTE_COST_PER_PROPERTY;
   const blockchainGasCost = properties * BLOCKCHAIN_GAS_COST_PER_PROPERTY;
-  const totalUsd = storageCost + awsComputeCost + blockchainGasCost;
+  const { laborCost, counties, weeks, peoplePerWeek } = calculateLabor(properties);
+  const totalUsd = storageCost + awsComputeCost + blockchainGasCost + laborCost;
 
   return {
     properties,
@@ -95,17 +135,40 @@ function calculateFromTokens(tokens: number): CalculationResult {
       storage: storageCost,
       awsCompute: awsComputeCost,
       blockchainGas: blockchainGasCost,
+      labor: laborCost,
       total: totalUsd,
+    },
+    timeline: {
+      counties,
+      weeks,
+      peoplePerWeek,
     },
   };
 }
 
 function calculateFromUsd(usd: number): CalculationResult {
-  const properties = usd / TOTAL_COST_PER_PROPERTY;
+  // We need to solve: properties * TOTAL_COST_PER_PROPERTY + laborCost = usd
+  // But laborCost depends on properties, so we need to iterate or approximate
+  // For simplicity, let's use an iterative approach
+  let properties = usd / (TOTAL_COST_PER_PROPERTY + (COST_PER_PERSON_PER_WEEK / PROPERTIES_PER_COUNTY));
+  let prevProperties = 0;
+  let iterations = 0;
+
+  // Iterate to find the correct properties value
+  while (Math.abs(properties - prevProperties) > 0.01 && iterations < 100) {
+    prevProperties = properties;
+    const { laborCost } = calculateLabor(properties);
+    const nonLaborCost = properties * TOTAL_COST_PER_PROPERTY;
+    const totalCost = nonLaborCost + laborCost;
+    properties = properties * (usd / totalCost);
+    iterations++;
+  }
+
   const tokens = properties * TOKENS_PER_PROPERTY;
   const storageCost = properties * STORAGE_COST_PER_PROPERTY;
   const awsComputeCost = properties * AWS_COMPUTE_COST_PER_PROPERTY;
   const blockchainGasCost = properties * BLOCKCHAIN_GAS_COST_PER_PROPERTY;
+  const { laborCost, counties, weeks, peoplePerWeek } = calculateLabor(properties);
 
   return {
     properties,
@@ -115,7 +178,13 @@ function calculateFromUsd(usd: number): CalculationResult {
       storage: storageCost,
       awsCompute: awsComputeCost,
       blockchainGas: blockchainGasCost,
+      labor: laborCost,
       total: usd,
+    },
+    timeline: {
+      counties,
+      weeks,
+      peoplePerWeek,
     },
   };
 }
@@ -159,8 +228,34 @@ function printResult(result: CalculationResult, isFromTokens: boolean) {
   console.log(`    Storage:        ${formatCurrency(result.costBreakdown.storage)}`);
   console.log(`    AWS Compute:    ${formatCurrency(result.costBreakdown.awsCompute)}`);
   console.log(`    Blockchain Gas: ${formatCurrency(result.costBreakdown.blockchainGas)}`);
+  console.log(`    Labor:          ${formatCurrency(result.costBreakdown.labor)}`);
   console.log(dim + "  ───────────────────────────────────────────────────" + reset);
   console.log(`    Total:          ${highlight}${formatCurrency(result.costBreakdown.total)}${reset}`);
+  console.log(dim + "═══════════════════════════════════════════════════" + reset);
+  console.log(dim + "  Timeline:" + reset);
+  console.log(`    Counties:       ${formatNumber(result.timeline.counties, 2)}`);
+  console.log(`    Weeks:          ${highlight}${result.timeline.weeks}${reset}`);
+  if (result.timeline.peoplePerWeek.length > 0) {
+    const weeks = result.timeline.peoplePerWeek.length;
+    if (weeks <= 8) {
+      // Show all weeks if 8 or fewer
+      const weekDetails = result.timeline.peoplePerWeek.map((people, idx) =>
+        `Week ${idx + 1}: ${Math.round(people)} ${Math.round(people) === 1 ? 'person' : 'people'}`
+      ).join('\n    ');
+      console.log(`    Schedule:\n    ${weekDetails}`);
+    } else {
+      // Show first 3 weeks, pattern, and last 3 weeks
+      const firstWeeks = result.timeline.peoplePerWeek.slice(0, 3).map((people, idx) =>
+        `Week ${idx + 1}: ${Math.round(people)} ${Math.round(people) === 1 ? 'person' : 'people'}`
+      ).join('\n    ');
+      const lastWeeks = result.timeline.peoplePerWeek.slice(-3).map((people, idx) =>
+        `Week ${weeks - 3 + idx + 1}: ${Math.round(people)} ${Math.round(people) === 1 ? 'person' : 'people'}`
+      ).join('\n    ');
+      console.log(`    Schedule:\n    ${firstWeeks}`);
+      console.log(`    ... (${weeks - 6} more weeks, increasing by ${MAX_PEOPLE_PER_WEEK} people each week) ...`);
+      console.log(`    ${lastWeeks}`);
+    }
+  }
   console.log(dim + "═══════════════════════════════════════════════════" + reset + "\n");
 }
 
