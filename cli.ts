@@ -609,39 +609,34 @@ function formatNumber(value: number, decimals: number = 2): string {
 }
 
 function printResult(result: CalculationResult, isFromTokens: boolean) {
-  const reset = "\u001b[0m";
-  // Minimal color scheme: subtle gray for structure, one accent for key values
-  const dim = Bun.color("#6b7280", "ansi") || ""; // Subtle gray for borders and labels
-  const highlight = Bun.color("#2563eb", "ansi") || ""; // Single accent color for important values
-
   console.log(
-    "\n" + dim + "═══════════════════════════════════════════════════" + reset,
+    "\n═══════════════════════════════════════════════════",
   );
 
   if (isFromTokens) {
     console.log(
-      `  Tokens Input: ${highlight}${formatNumber(result.tokens, 2)} tokens${reset}`,
+      `  Tokens Input: ${formatNumber(result.tokens, 2)} tokens`,
     );
     console.log(
-      `  USD Required: ${highlight}${formatCurrency(result.usd)}${reset}`,
+      `  USD Required: ${formatCurrency(result.usd)}`,
     );
   } else {
     console.log(
-      `  USD Input: ${highlight}${formatCurrency(result.usd)}${reset}`,
+      `  USD Input: ${formatCurrency(result.usd)}`,
     );
     console.log(
-      `  Tokens Earned: ${highlight}${formatNumber(result.tokens, 2)} tokens${reset}`,
+      `  Tokens Earned: ${formatNumber(result.tokens, 2)} tokens`,
     );
   }
 
   console.log(
-    dim + "═══════════════════════════════════════════════════" + reset,
+    "═══════════════════════════════════════════════════",
   );
   console.log(`  Properties: ${formatNumber(result.properties, 2)}`);
   console.log(
-    dim + "═══════════════════════════════════════════════════" + reset,
+    "═══════════════════════════════════════════════════",
   );
-  console.log(dim + "  Distribution:" + reset);
+  console.log("  Distribution:");
   console.log(
     `    Data Group:            ${result.distribution.dataGroupLabel}`,
   );
@@ -667,9 +662,9 @@ function printResult(result: CalculationResult, isFromTokens: boolean) {
     `    Avg Reward / Property: ${formatNumber(result.distribution.averageTokensPerProperty, 6)} tokens`,
   );
   console.log(
-    dim + "═══════════════════════════════════════════════════" + reset,
+    "═══════════════════════════════════════════════════",
   );
-  console.log(dim + "  Cost Breakdown:" + reset);
+  console.log("  Cost Breakdown:");
   console.log(
     `    Storage:        ${formatCurrency(result.costBreakdown.storage)}`,
   );
@@ -683,20 +678,20 @@ function printResult(result: CalculationResult, isFromTokens: boolean) {
     `    Labor:          ${formatCurrency(result.costBreakdown.labor)}`,
   );
   console.log(
-    dim + "  ───────────────────────────────────────────────────" + reset,
+    "  ───────────────────────────────────────────────────",
   );
   console.log(
-    `    Total:          ${highlight}${formatCurrency(result.costBreakdown.total)}${reset}`,
+    `    Total:          ${formatCurrency(result.costBreakdown.total)}`,
   );
   console.log(
-    dim + "═══════════════════════════════════════════════════" + reset,
+    "═══════════════════════════════════════════════════",
   );
-  console.log(dim + "  Timeline:" + reset);
+  console.log("  Timeline:");
   console.log(
     `    Counties:       ${formatNumber(result.timeline.counties, 2)}`,
   );
   console.log(
-    `    Weeks:          ${highlight}${result.timeline.weeks}${reset}`,
+    `    Weeks:          ${result.timeline.weeks}`,
   );
   if (result.timeline.peoplePerWeek.length > 0) {
     // Show all weeks
@@ -709,7 +704,7 @@ function printResult(result: CalculationResult, isFromTokens: boolean) {
     console.log(`    Schedule:\n    ${weekDetails}`);
   }
   console.log(
-    dim + "═══════════════════════════════════════════════════" + reset + "\n",
+    "═══════════════════════════════════════════════════\n",
   );
 }
 
