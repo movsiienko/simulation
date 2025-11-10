@@ -171,7 +171,7 @@ describe("CLI Argument Parsing", () => {
     expect(result.tokens).toBe(50);
     expect(result.dataGroup).toBe("county");
     expect(result.extractedProperties).toBe(10);
-    expect(result.maxWorkersPerWeek).toBe(8);
+    expect(result.maxTotalWorkers).toBe(8);
 
     Bun.argv = originalArgv;
   });
@@ -183,7 +183,7 @@ describe("CLI Argument Parsing", () => {
     const result = parseCliArgs();
 
     expect(result.usd).toBe(100);
-    expect(result.maxWorkersPerWeek).toBe(12);
+    expect(result.maxTotalWorkers).toBe(12);
 
     Bun.argv = originalArgv;
   });
