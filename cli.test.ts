@@ -1,5 +1,9 @@
 import { test, expect, describe, mock } from "bun:test";
-import { parseCliArgs, buildCalculationResult } from "./cli";
+import {
+  parseCliArgs,
+  buildCalculationResult,
+  summarizeParallelExecution,
+} from "./cli";
 
 function withMockedArgv(argv: string[], fn: () => void) {
   const originalArgv = Bun.argv;
@@ -43,6 +47,7 @@ describe("CLI Argument Parsing", () => {
       expect(result.properties).toBe(100);
       expect(result.dataGroup).toBe("county");
       expect(result.extractedProperties).toBe(0);
+      expect(result.parallelDataGroups).toBe(1);
     });
   });
 
@@ -116,6 +121,33 @@ describe("CLI Argument Parsing", () => {
         const result = parseCliArgs();
         expect(result.trainingCostPerPersonPerWeek).toBe(750);
         expect(result.extractionCostPerPersonPerWeek).toBe(3100);
+      },
+    );
+  });
+
+  test("should accept parallel data groups via long flag", () => {
+    withMockedArgv(
+      [
+        "bun",
+        "cli.ts",
+        "--properties",
+        "40",
+        "--parallel-data-groups",
+        "3",
+      ],
+      () => {
+        const result = parseCliArgs();
+        expect(result.parallelDataGroups).toBe(3);
+      },
+    );
+  });
+
+  test("should accept parallel data groups via short flag", () => {
+    withMockedArgv(
+      ["bun", "cli.ts", "--properties", "40", "-c", "2"],
+      () => {
+        const result = parseCliArgs();
+        expect(result.parallelDataGroups).toBe(2);
       },
     );
   });
@@ -213,6 +245,19 @@ describe("CLI Argument Parsing", () => {
           expect(() => parseCliArgs()).toThrow("exit called");
           expect(ctx.exitCode).toBe(1);
           expect(ctx.errorMessage).toContain("Invalid max workers value");
+        },
+      );
+    });
+  });
+
+  test("should reject invalid parallel data groups value", () => {
+    withMockedExit((ctx) => {
+      withMockedArgv(
+        ["bun", "cli.ts", "--properties", "10", "--parallel-data-groups", "0"],
+        () => {
+          expect(() => parseCliArgs()).toThrow("exit called");
+          expect(ctx.exitCode).toBe(1);
+          expect(ctx.errorMessage).toContain("Invalid parallel data groups value");
         },
       );
     });
@@ -321,7 +366,7 @@ describe("Heartbeat calculations", () => {
       context: { startIndex: 0, dataGroup: { label: "County" } },
     });
 
-    expect(result.timeline.weeks).toBe(64);
+    expect(result.timeline.weeks).toBe(62);
     expect(result.timeline.heartbeatPeoplePerWeek.some((count) => count > 0)).toBe(
       true,
     );
@@ -329,5 +374,47 @@ describe("Heartbeat calculations", () => {
       result.heartbeat.peopleNeeded,
     );
     expect(result.timeline.heartbeatPeoplePerWeek.at(-1)).toBe(30);
+    const schedule = result.timeline.peoplePerWeek;
+    for (let i = 1; i < schedule.length; i++) {
+      expect(schedule[i]).toBeGreaterThanOrEqual(schedule[i - 1]);
+    }
+  });
+});
+
+describe("Parallel execution summary", () => {
+  test("scales costs, resources, and properties", () => {
+    const base = buildCalculationResult({
+      properties: 10_000_000,
+      context: { startIndex: 0, dataGroup: { label: "County" } },
+    });
+
+    const summary = summarizeParallelExecution(base, 3);
+
+    expect(summary.dataGroups).toBe(3);
+    expect(summary.totalProperties).toBe(base.properties * 3);
+    expect(summary.costBreakdown.total).toBeCloseTo(
+      base.costBreakdown.total * 3,
+    );
+    expect(summary.costBreakdown.storage).toBeCloseTo(
+      base.costBreakdown.storage * 3,
+    );
+    expect(summary.timeline.counties).toBeCloseTo(
+      base.timeline.counties * 3,
+    );
+    expect(summary.timeline.weeks).toBe(base.timeline.weeks);
+    if (base.timeline.peoplePerWeek.length > 0) {
+      expect(summary.timeline.peoplePerWeek.length).toBe(
+        base.timeline.peoplePerWeek.length,
+      );
+      expect(summary.timeline.peoplePerWeek[0]).toBeCloseTo(
+        base.timeline.peoplePerWeek[0] * 3,
+      );
+    }
+    expect(summary.heartbeat.peopleNeeded).toBe(
+      base.heartbeat.peopleNeeded * 3,
+    );
+    expect(summary.heartbeat.weeklyTotalCost).toBeCloseTo(
+      base.heartbeat.weeklyTotalCost * 3,
+    );
   });
 });

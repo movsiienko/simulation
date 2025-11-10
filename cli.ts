@@ -31,6 +31,7 @@ interface CliOptions {
   maxNewPeoplePerWeek?: number;
   trainingCostPerPersonPerWeek: number;
   extractionCostPerPersonPerWeek: number;
+  parallelDataGroups: number;
 }
 
 const TOTAL_PROPERTIES = 150_000_000;
@@ -49,6 +50,7 @@ const DEFAULT_TRAINING_COST_PER_PERSON_PER_WEEK = 0;
 const DEFAULT_EXTRACTION_COST_PER_PERSON_PER_WEEK = 2500;
 const DEFAULT_MAX_NEW_PEOPLE_PER_WEEK = 5;
 const DEFAULT_MAX_TOTAL_WORKERS = Number.POSITIVE_INFINITY;
+const DEFAULT_PARALLEL_DATA_GROUPS = 1;
 const HEARTBEAT_PROPERTIES_PER_PERSON_PER_WEEK = 5_000_000;
 const HEARTBEAT_COMPUTE_COST_PER_PROPERTY = AWS_COMPUTE_COST_PER_PROPERTY;
 const HEARTBEAT_BLOCKCHAIN_COST_PER_PROPERTY = BLOCKCHAIN_GAS_COST_PER_PROPERTY;
@@ -136,6 +138,10 @@ function parseCliArgs(): CliOptions {
       "extraction-price": {
         type: "string",
         short: "x",
+      },
+      "parallel-data-groups": {
+        type: "string",
+        short: "c",
       },
     },
     strict: true,
@@ -266,6 +272,21 @@ function parseCliArgs(): CliOptions {
     }
   }
 
+  let parallelDataGroups = DEFAULT_PARALLEL_DATA_GROUPS;
+  if (values["parallel-data-groups"] !== undefined) {
+    parallelDataGroups = Number(values["parallel-data-groups"]);
+    if (
+      !Number.isFinite(parallelDataGroups) ||
+      !Number.isInteger(parallelDataGroups) ||
+      parallelDataGroups <= 0
+    ) {
+      console.error(
+        `Error: Invalid parallel data groups value: ${values["parallel-data-groups"]}. It must be a positive whole number.`,
+      );
+      process.exit(1);
+    }
+  }
+
   return {
     properties,
     extractedProperties,
@@ -274,6 +295,7 @@ function parseCliArgs(): CliOptions {
     maxNewPeoplePerWeek,
     trainingCostPerPersonPerWeek,
     extractionCostPerPersonPerWeek,
+    parallelDataGroups,
   } satisfies CliOptions;
 }
 
@@ -355,6 +377,29 @@ interface WorkerContext {
   totalNewPeople: number;
   totalWorkerLimit: number;
   weeklyOnboardingLimit: number;
+}
+
+function onboardNewWorkers(context: WorkerContext, requested: number): number {
+  if (requested <= 0) {
+    return 0;
+  }
+
+  const remainingNewCapacity = Math.max(
+    0,
+    context.totalWorkerLimit - context.totalNewPeople,
+  );
+  const remainingWeeklyCapacity = Math.max(
+    0,
+    context.weeklyOnboardingLimit - context.newPeopleThisWeek,
+  );
+  const newWorkers = Math.min(requested, remainingNewCapacity, remainingWeeklyCapacity);
+
+  if (newWorkers > 0) {
+    context.totalNewPeople += newWorkers;
+    context.newPeopleThisWeek += newWorkers;
+  }
+
+  return newWorkers;
 }
 
 interface LaborOptions {
@@ -453,24 +498,10 @@ function assignWorkersToTier(
     return;
   }
 
-  const remainingNewCapacity = Math.max(
-    0,
-    context.totalWorkerLimit - context.totalNewPeople,
-  );
-  const remainingWeeklyCapacity = Math.max(
-    0,
-    context.weeklyOnboardingLimit - context.newPeopleThisWeek,
-  );
-  const newStarters = Math.min(
-    remainingToStart,
-    remainingNewCapacity,
-    remainingWeeklyCapacity,
-  );
+  const newStarters = onboardNewWorkers(context, remainingToStart);
 
   if (newStarters > 0) {
     stageCounts[0] += newStarters;
-    context.totalNewPeople += newStarters;
-    context.newPeopleThisWeek += newStarters;
   }
 }
 
@@ -529,7 +560,7 @@ function calculateLabor(
   let heartbeatPeople = 0;
   let tickCount = 0;
   let weekTickCounter = 0;
-  let accumulatedActiveWorkers = 0;
+  let accumulatedHeadcount = 0;
 
   const tickDuration = 1 / TICKS_PER_WEEK;
 
@@ -537,6 +568,7 @@ function calculateLabor(
     assignWorkersToTier(currentTierState, stageCounts, workerContext);
 
     const activeWorkers = stageCounts.reduce((sum, count) => sum + count, 0);
+    const totalHeadcount = activeWorkers + heartbeatPeople + workerContext.idleWorkers;
     const tierFinished =
       currentTierState.countiesCompletedInt >=
         currentTierState.workload.countiesNeeded &&
@@ -559,7 +591,7 @@ function calculateLabor(
 
     tickCount++;
     weekTickCounter++;
-    accumulatedActiveWorkers += activeWorkers;
+    accumulatedHeadcount += totalHeadcount;
 
     const trainingWorkers =
       currentTierState.trainingTicks > 0
@@ -603,25 +635,6 @@ function calculateLabor(
     );
 
     let returningWorkers = finishingThisTick;
-    const heartbeatNeeded =
-      propertiesCompleted === 0
-        ? 0
-        : Math.ceil(
-            propertiesCompleted / HEARTBEAT_PROPERTIES_PER_PERSON_PER_WEEK,
-          );
-    const additionalHeartbeatNeeded = Math.max(
-      0,
-      heartbeatNeeded - heartbeatPeople,
-    );
-    const workersToHeartbeat = Math.min(
-      additionalHeartbeatNeeded,
-      returningWorkers,
-    );
-    if (workersToHeartbeat > 0) {
-      heartbeatPeople += workersToHeartbeat;
-      returningWorkers -= workersToHeartbeat;
-    }
-
     const postShiftActive = stageCounts.reduce((sum, count) => sum + count, 0);
     const countiesStarted = Math.min(
       currentTierState.workload.countiesNeeded,
@@ -638,23 +651,52 @@ function calculateLabor(
 
     if (returningWorkers > 0) {
       workerContext.idleWorkers += returningWorkers;
+      returningWorkers = 0;
     }
 
     if (remainingToStart > 0) {
       assignWorkersToTier(currentTierState, stageCounts, workerContext);
     }
 
+    const heartbeatNeeded =
+      propertiesCompleted === 0
+        ? 0
+        : Math.ceil(
+            propertiesCompleted / HEARTBEAT_PROPERTIES_PER_PERSON_PER_WEEK,
+          );
+    let additionalHeartbeatNeeded = Math.max(
+      0,
+      heartbeatNeeded - heartbeatPeople,
+    );
+
+    if (additionalHeartbeatNeeded > 0 && workerContext.idleWorkers > 0) {
+      const fromIdle = Math.min(additionalHeartbeatNeeded, workerContext.idleWorkers);
+      workerContext.idleWorkers -= fromIdle;
+      heartbeatPeople += fromIdle;
+      additionalHeartbeatNeeded -= fromIdle;
+    }
+
+    if (additionalHeartbeatNeeded > 0) {
+      const newHeartbeat = onboardNewWorkers(
+        workerContext,
+        additionalHeartbeatNeeded,
+      );
+      if (newHeartbeat > 0) {
+        heartbeatPeople += newHeartbeat;
+      }
+    }
+
     if (weekTickCounter === TICKS_PER_WEEK) {
-      peoplePerWeek.push(accumulatedActiveWorkers / TICKS_PER_WEEK);
+      peoplePerWeek.push(accumulatedHeadcount / TICKS_PER_WEEK);
       heartbeatPeoplePerWeek.push(heartbeatPeople);
-      accumulatedActiveWorkers = 0;
+      accumulatedHeadcount = 0;
       weekTickCounter = 0;
       workerContext.newPeopleThisWeek = 0;
     }
   }
 
   if (weekTickCounter > 0) {
-    peoplePerWeek.push(accumulatedActiveWorkers / weekTickCounter);
+    peoplePerWeek.push(accumulatedHeadcount / weekTickCounter);
     heartbeatPeoplePerWeek.push(heartbeatPeople);
   }
 
@@ -831,13 +873,74 @@ function formatNumber(value: number, decimals: number = 2): string {
   }).format(value);
 }
 
-function printResult(result: CalculationResult) {
+interface ParallelExecutionSummary {
+  dataGroups: number;
+  totalProperties: number;
+  costBreakdown: CalculationResult["costBreakdown"];
+  timeline: CalculationResult["timeline"];
+  heartbeat: HeartbeatSummary;
+}
+
+function summarizeParallelExecution(
+  result: CalculationResult,
+  parallelDataGroups: number,
+): ParallelExecutionSummary {
+  const factor = Math.max(1, Math.floor(parallelDataGroups));
+
+  const scaledCostBreakdown: CalculationResult["costBreakdown"] = {
+    storage: result.costBreakdown.storage * factor,
+    awsCompute: result.costBreakdown.awsCompute * factor,
+    blockchainGas: result.costBreakdown.blockchainGas * factor,
+    labor: result.costBreakdown.labor * factor,
+    heartbeatLabor: result.costBreakdown.heartbeatLabor * factor,
+    heartbeatCompute: result.costBreakdown.heartbeatCompute * factor,
+    heartbeatBlockchain: result.costBreakdown.heartbeatBlockchain * factor,
+    total: result.costBreakdown.total * factor,
+  } satisfies CalculationResult["costBreakdown"];
+
+  const timeline: CalculationResult["timeline"] = {
+    counties: result.timeline.counties * factor,
+    weeks: result.timeline.weeks,
+    peoplePerWeek: result.timeline.peoplePerWeek.map((count) => count * factor),
+    heartbeatPeoplePerWeek: result.timeline.heartbeatPeoplePerWeek.map(
+      (count) => count * factor,
+    ),
+  };
+
+  const heartbeat: HeartbeatSummary = {
+    properties: result.heartbeat.properties * factor,
+    peopleNeeded: result.heartbeat.peopleNeeded * factor,
+    weeklyLaborCost: result.heartbeat.weeklyLaborCost * factor,
+    weeklyComputeCost: result.heartbeat.weeklyComputeCost * factor,
+    weeklyBlockchainCost: result.heartbeat.weeklyBlockchainCost * factor,
+    weeklyTotalCost: result.heartbeat.weeklyTotalCost * factor,
+  } satisfies HeartbeatSummary;
+
+  return {
+    dataGroups: factor,
+    totalProperties: result.properties * factor,
+    costBreakdown: scaledCostBreakdown,
+    timeline,
+    heartbeat,
+  } satisfies ParallelExecutionSummary;
+}
+
+function printResult(
+  result: CalculationResult,
+  options: { parallelDataGroups?: number } = {},
+) {
+  const parallelDataGroups = Math.max(1, options.parallelDataGroups ?? 1);
   console.log(
     "\n═══════════════════════════════════════════════════",
   );
   console.log(
     `  Requested Properties: ${formatNumber(result.properties, 2)}`,
   );
+  if (parallelDataGroups > 1) {
+    console.log(
+      `  Parallel Data Groups: ${parallelDataGroups} (per-group details below)`,
+    );
+  }
   console.log(
     "═══════════════════════════════════════════════════",
   );
@@ -908,7 +1011,7 @@ function printResult(result: CalculationResult) {
           `Week ${idx + 1}: ${Math.round(people)} ${Math.round(people) === 1 ? "person" : "people"}`,
       )
       .join("\n    ");
-    console.log(`    Schedule:\n    ${weekDetails}`);
+    console.log(`    Schedule (total staffed headcount):\n    ${weekDetails}`);
   }
   const heartbeatTimeline = result.timeline.heartbeatPeoplePerWeek;
   if (heartbeatTimeline.length > 0) {
@@ -956,6 +1059,72 @@ function printResult(result: CalculationResult) {
   console.log(
     "═══════════════════════════════════════════════════\n",
   );
+
+  if (parallelDataGroups > 1) {
+    const parallelSummary = summarizeParallelExecution(result, parallelDataGroups);
+    console.log(
+      "  Parallel Execution Summary (aggregated across data groups):",
+    );
+    console.log(
+      `    Total Properties:    ${formatNumber(parallelSummary.totalProperties, 2)}`,
+    );
+    console.log(
+      `    Total Counties:      ${formatNumber(parallelSummary.timeline.counties, 2)}`,
+    );
+    console.log(
+      `    Shared Timeline:     ${parallelSummary.timeline.weeks} ${parallelSummary.timeline.weeks === 1 ? "week" : "weeks"}`,
+    );
+    console.log(
+      `    Total Cost:          ${formatCurrency(parallelSummary.costBreakdown.total)}`,
+    );
+    console.log(
+      `      Storage:          ${formatCurrency(parallelSummary.costBreakdown.storage)}`,
+    );
+    console.log(
+      `      AWS Compute:      ${formatCurrency(parallelSummary.costBreakdown.awsCompute)}`,
+    );
+    console.log(
+      `      Blockchain Gas:   ${formatCurrency(parallelSummary.costBreakdown.blockchainGas)}`,
+    );
+    console.log(
+      `      Labor:            ${formatCurrency(parallelSummary.costBreakdown.labor)}`,
+    );
+    console.log(
+      `      Heartbeat Labor:  ${formatCurrency(parallelSummary.costBreakdown.heartbeatLabor)}`,
+    );
+    console.log(
+      `      Heartbeat CPU:    ${formatCurrency(parallelSummary.costBreakdown.heartbeatCompute)}`,
+    );
+    console.log(
+      `      Heartbeat Gas:    ${formatCurrency(parallelSummary.costBreakdown.heartbeatBlockchain)}`,
+    );
+    const aggregatedSchedule = parallelSummary.timeline.peoplePerWeek;
+    if (aggregatedSchedule.length > 0) {
+      const peakPeople = aggregatedSchedule.reduce(
+        (max, people) => Math.max(max, people),
+        0,
+      );
+      const peakWeek = aggregatedSchedule.findIndex(
+        (count) => count === peakPeople,
+      );
+      console.log(
+        `    Peak Workforce:     ${Math.round(peakPeople)} people (week ${peakWeek >= 0 ? peakWeek + 1 : "n/a"})`,
+      );
+    }
+    if (parallelSummary.timeline.heartbeatPeoplePerWeek.length > 0) {
+      const finalHeartbeat =
+        parallelSummary.timeline.heartbeatPeoplePerWeek.at(-1) ?? 0;
+      console.log(
+        `    Heartbeat People:   ${formatNumber(parallelSummary.heartbeat.peopleNeeded, 0)} (final ${formatNumber(finalHeartbeat, 0)} active)`,
+      );
+      console.log(
+        `    Heartbeat Run-Rate: ${formatCurrency(parallelSummary.heartbeat.weeklyTotalCost)}`,
+      );
+    }
+    console.log(
+      "═══════════════════════════════════════════════════\n",
+    );
+  }
 }
 
 function main() {
@@ -969,7 +1138,7 @@ function main() {
     trainingCostPerPersonPerWeek: options.trainingCostPerPersonPerWeek,
     extractionCostPerPersonPerWeek: options.extractionCostPerPersonPerWeek,
   });
-  printResult(result);
+  printResult(result, { parallelDataGroups: options.parallelDataGroups });
 }
 
 if (import.meta.main) {
@@ -979,7 +1148,9 @@ if (import.meta.main) {
 export {
   parseCliArgs,
   buildCalculationResult,
+  summarizeParallelExecution,
   type CliOptions,
   type CalculationResult,
   type HeartbeatSummary,
+  type ParallelExecutionSummary,
 };
