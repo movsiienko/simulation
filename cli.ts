@@ -1,12 +1,52 @@
 import { parseArgs } from "util";
 
+interface DataGroupConfig {
+  label: string;
+  tokenShare: number;
+}
+
+const DATA_GROUPS = {
+  county: { label: "County", tokenShare: 0.6 },
+  photo: { label: "Photo", tokenShare: 0.15 },
+  mortgage: { label: "Mortgage", tokenShare: 0.03 },
+  hoa: { label: "HOA", tokenShare: 0.03 },
+  proprtyRanking: { label: "PropertyRanking", tokenShare: 0.01 },
+  propertyImprovement: { label: "PropertyImprovement", tokenShare: 0.05 },
+  envCharateris: { label: "EnvCharateris", tokenShare: 0.01 },
+  safetyAndSecurity: { label: "SafetyAndSecurity", tokenShare: 0.01 },
+  transportationAndAccess: {
+    label: "TransportationAndAccess",
+    tokenShare: 0.01,
+  },
+  school: { label: "School", tokenShare: 0.01 },
+} as const satisfies Record<string, DataGroupConfig>;
+
+type DataGroupKey = keyof typeof DATA_GROUPS;
+
 interface CliOptions {
   tokens?: number;
   usd?: number;
+  extractedProperties: number;
+  dataGroup: DataGroupKey;
 }
 
+interface DecayParameters {
+  totalTokens: number;
+  totalProperties: number;
+  lambda: number;
+  a0: number;
+  expNegLambda: number;
+  geometricDenominator: number;
+}
+
+const TOTAL_TOKENS = 100_000_000;
+const TOTAL_PROPERTIES = 150_000_000;
+const MIN_TAIL_REWARD = 0.01;
+
+const DECAY_PARAMS = buildDecayParameters();
+
 function parseCliArgs(): CliOptions {
-  const { values, positionals } = parseArgs({
+  const { values } = parseArgs({
     args: Bun.argv.slice(2), // Skip 'bun' and script path
     options: {
       tokens: {
@@ -16,6 +56,14 @@ function parseCliArgs(): CliOptions {
       usd: {
         type: "string",
         short: "u",
+      },
+      "data-group": {
+        type: "string",
+        short: "g",
+      },
+      "extracted-properties": {
+        type: "string",
+        short: "e",
       },
     },
     strict: true,
@@ -39,13 +87,54 @@ function parseCliArgs(): CliOptions {
   }
 
   // Parse and validate numbers
+  const dataGroupInput = (
+    (values["data-group"] as string | undefined) ?? "county"
+  ).toLowerCase();
+  const dataGroup = DATA_GROUPS[dataGroupInput];
+  if (!dataGroup) {
+    console.error(
+      `Error: Unsupported data group "${values["data-group"]}". Available data groups are ${Object.values(
+        DATA_GROUPS,
+      )
+        .map((dgroup) => dgroup.label)
+        .join(", ")}`,
+    );
+    process.exit(1);
+  }
+
+  let extractedProperties = 0;
+  if (values["extracted-properties"] !== undefined) {
+    extractedProperties = parseFloat(values["extracted-properties"] as string);
+    if (isNaN(extractedProperties) || extractedProperties < 0) {
+      console.error(
+        `Error: Invalid extracted property count: ${values["extracted-properties"]}`,
+      );
+      process.exit(1);
+    }
+    if (!Number.isInteger(extractedProperties)) {
+      console.error("Error: Extracted properties must be a whole number.");
+      process.exit(1);
+    }
+  }
+
+  if (extractedProperties > TOTAL_PROPERTIES) {
+    console.error(
+      `Error: Extracted properties (${extractedProperties}) cannot exceed total available properties (${TOTAL_PROPERTIES}).`,
+    );
+    process.exit(1);
+  }
+
   if (hasTokens) {
     const tokens = parseFloat(values.tokens as string);
     if (isNaN(tokens)) {
       console.error(`Error: Invalid token amount: ${values.tokens}`);
       process.exit(1);
     }
-    return { tokens };
+    return {
+      tokens,
+      extractedProperties,
+      dataGroup: dataGroupInput as DataGroupKey,
+    };
   }
 
   if (hasUsd) {
@@ -54,14 +143,157 @@ function parseCliArgs(): CliOptions {
       console.error(`Error: Invalid USD amount: ${values.usd}`);
       process.exit(1);
     }
-    return { usd };
+    return {
+      usd,
+      extractedProperties,
+      dataGroup: dataGroupInput as DataGroupKey,
+    };
   }
 
-  return {};
+  return {
+    extractedProperties,
+    dataGroup: dataGroupInput as DataGroupKey,
+  };
 }
 
-// Constants
-const TOKENS_PER_PROPERTY = 0.6;
+interface DistributionContext {
+  startIndex: number;
+  dataGroup: DataGroupConfig;
+}
+
+function buildDistributionContext(options: CliOptions): DistributionContext {
+  return {
+    startIndex: options.extractedProperties,
+    dataGroup: DATA_GROUPS[options.dataGroup],
+  };
+}
+
+function lastAllocation(lambda: number): number {
+  const numerator = 1 - Math.exp(-lambda);
+  const denominator = 1 - Math.exp(-lambda * TOTAL_PROPERTIES);
+  const a0 = TOTAL_TOKENS * (numerator / denominator);
+  return a0 * Math.exp(-lambda * (TOTAL_PROPERTIES - 1));
+}
+
+function solveLambdaForTail(
+  lo: number = 1e-16,
+  hi: number = 1e-5,
+  iters: number = 200,
+): number {
+  for (let i = 0; i < iters; i++) {
+    const mid = 0.5 * (lo + hi);
+    if (lastAllocation(mid) > MIN_TAIL_REWARD) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return 0.5 * (lo + hi);
+}
+
+function a0FromLambda(lambda: number): number {
+  const numerator = 1 - Math.exp(-lambda);
+  const denominator = 1 - Math.exp(-lambda * TOTAL_PROPERTIES);
+  return TOTAL_TOKENS * (numerator / denominator);
+}
+
+function buildDecayParameters(): DecayParameters {
+  const lambda = solveLambdaForTail();
+  const a0 = a0FromLambda(lambda);
+  const expNegLambda = Math.exp(-lambda);
+  const geometricDenominator = 1 - expNegLambda;
+  return {
+    totalTokens: TOTAL_TOKENS,
+    totalProperties: TOTAL_PROPERTIES,
+    lambda,
+    a0,
+    expNegLambda,
+    geometricDenominator,
+  };
+}
+
+function tokensForRange(
+  startIndex: number,
+  count: number,
+  dataGroup: DataGroupConfig,
+): number {
+  if (count <= 0 || startIndex >= DECAY_PARAMS.totalProperties) {
+    return 0;
+  }
+
+  const cappedCount = Math.min(
+    count,
+    DECAY_PARAMS.totalProperties - startIndex,
+  );
+
+  const startFactor = Math.exp(-DECAY_PARAMS.lambda * startIndex);
+  const numerator = 1 - Math.exp(-DECAY_PARAMS.lambda * cappedCount);
+  const baseTokens =
+    DECAY_PARAMS.a0 *
+    startFactor *
+    (numerator / DECAY_PARAMS.geometricDenominator);
+
+  return dataGroup.tokenShare * baseTokens;
+}
+
+function allocationForIndex(index: number, dataGroup: DataGroupConfig): number {
+  if (index < 0 || index >= DECAY_PARAMS.totalProperties) {
+    return 0;
+  }
+  const base = DECAY_PARAMS.a0 * Math.exp(-DECAY_PARAMS.lambda * index);
+  return dataGroup.tokenShare * base;
+}
+
+function availableProperties(startIndex: number): number {
+  return Math.max(0, DECAY_PARAMS.totalProperties - startIndex);
+}
+
+function propertiesForTokens(
+  tokens: number,
+  context: DistributionContext,
+  tolerance: number = 1e-6,
+): number {
+  if (tokens <= 0) {
+    return 0;
+  }
+
+  const maxCount = availableProperties(context.startIndex);
+  if (maxCount === 0) {
+    return 0;
+  }
+
+  const maxTokens = tokensForRange(
+    context.startIndex,
+    maxCount,
+    context.dataGroup,
+  );
+
+  if (tokens >= maxTokens) {
+    return maxCount;
+  }
+
+  let lo = 0;
+  let hi = maxCount;
+
+  for (let i = 0; i < 120; i++) {
+    const mid = 0.5 * (lo + hi);
+    const minted = tokensForRange(context.startIndex, mid, context.dataGroup);
+
+    if (Math.abs(minted - tokens) <= tolerance) {
+      return mid;
+    }
+
+    if (minted < tokens) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+
+  return hi;
+}
+
+// Cost constants
 const STORAGE_COST_PER_PROPERTY = 1200 / 10000000; // $0.00012
 const AWS_COMPUTE_COST_PER_PROPERTY = 0.0003;
 const BLOCKCHAIN_GAS_COST_PER_PROPERTY = 0.0013;
@@ -69,7 +301,6 @@ const TOTAL_COST_PER_PROPERTY =
   STORAGE_COST_PER_PROPERTY +
   AWS_COMPUTE_COST_PER_PROPERTY +
   BLOCKCHAIN_GAS_COST_PER_PROPERTY;
-const COST_PER_TOKEN = TOTAL_COST_PER_PROPERTY / TOKENS_PER_PROPERTY;
 
 // Labor constants
 const PROPERTIES_PER_COUNTY = 56708.373011800926;
@@ -93,6 +324,18 @@ interface CalculationResult {
     weeks: number;
     peoplePerWeek: number[];
   };
+  distribution: DistributionDetails;
+}
+
+interface DistributionDetails {
+  dataGroupLabel: string;
+  extractedBefore: number;
+  startPropertyRank: number;
+  endPropertyRank: number;
+  availableProperties: number;
+  firstPropertyReward: number;
+  lastPropertyReward: number;
+  averageTokensPerProperty: number;
 }
 
 function calculateLabor(properties: number): {
@@ -175,35 +418,21 @@ function calculateLabor(properties: number): {
   return { laborCost, counties, weeks, peoplePerWeek };
 }
 
-function calculateFromTokens(tokens: number): CalculationResult {
-  const properties = tokens / TOKENS_PER_PROPERTY;
-  const storageCost = properties * STORAGE_COST_PER_PROPERTY;
-  const awsComputeCost = properties * AWS_COMPUTE_COST_PER_PROPERTY;
-  const blockchainGasCost = properties * BLOCKCHAIN_GAS_COST_PER_PROPERTY;
-  const { laborCost, counties, weeks, peoplePerWeek } =
-    calculateLabor(properties);
-  const totalUsd = storageCost + awsComputeCost + blockchainGasCost + laborCost;
-
-  return {
+function calculateFromTokens(
+  tokens: number,
+  context: DistributionContext,
+): CalculationResult {
+  const properties = propertiesForTokens(tokens, context);
+  return buildCalculationResult({
     properties,
-    tokens,
-    usd: totalUsd,
-    costBreakdown: {
-      storage: storageCost,
-      awsCompute: awsComputeCost,
-      blockchainGas: blockchainGasCost,
-      labor: laborCost,
-      total: totalUsd,
-    },
-    timeline: {
-      counties,
-      weeks,
-      peoplePerWeek,
-    },
-  };
+    context,
+  });
 }
 
-function calculateFromUsd(usd: number): CalculationResult {
+function calculateFromUsd(
+  usd: number,
+  context: DistributionContext,
+): CalculationResult {
   // We need to solve: properties * TOTAL_COST_PER_PROPERTY + laborCost = usd
   // But laborCost depends on properties, so we need to iterate or approximate
   // For simplicity, let's use an iterative approach
@@ -224,29 +453,106 @@ function calculateFromUsd(usd: number): CalculationResult {
     iterations++;
   }
 
-  const tokens = properties * TOKENS_PER_PROPERTY;
-  const storageCost = properties * STORAGE_COST_PER_PROPERTY;
-  const awsComputeCost = properties * AWS_COMPUTE_COST_PER_PROPERTY;
-  const blockchainGasCost = properties * BLOCKCHAIN_GAS_COST_PER_PROPERTY;
+  properties = Math.min(properties, availableProperties(context.startIndex));
+
+  return buildCalculationResult({
+    properties,
+    context,
+    usdOverride: usd,
+  });
+}
+
+interface ResultBuilderOptions {
+  properties: number;
+  context: DistributionContext;
+  usdOverride?: number;
+}
+
+function buildCalculationResult({
+  properties,
+  context,
+  usdOverride,
+}: ResultBuilderOptions): CalculationResult {
+  const clampedProperties = Math.min(
+    properties,
+    availableProperties(context.startIndex),
+  );
+
+  const storageCost = clampedProperties * STORAGE_COST_PER_PROPERTY;
+  const awsComputeCost = clampedProperties * AWS_COMPUTE_COST_PER_PROPERTY;
+  const blockchainGasCost =
+    clampedProperties * BLOCKCHAIN_GAS_COST_PER_PROPERTY;
   const { laborCost, counties, weeks, peoplePerWeek } =
-    calculateLabor(properties);
+    calculateLabor(clampedProperties);
+  const computedTotal =
+    storageCost + awsComputeCost + blockchainGasCost + laborCost;
+  const usdValue = usdOverride ?? computedTotal;
+  const tokens = tokensForRange(
+    context.startIndex,
+    clampedProperties,
+    context.dataGroup,
+  );
+  const distribution = summarizeDistribution(
+    clampedProperties,
+    context,
+    tokens,
+  );
 
   return {
-    properties,
+    properties: clampedProperties,
     tokens,
-    usd,
+    usd: usdValue,
     costBreakdown: {
       storage: storageCost,
       awsCompute: awsComputeCost,
       blockchainGas: blockchainGasCost,
       labor: laborCost,
-      total: usd,
+      total: usdValue,
     },
     timeline: {
       counties,
       weeks,
       peoplePerWeek,
     },
+    distribution,
+  };
+}
+
+function summarizeDistribution(
+  properties: number,
+  context: DistributionContext,
+  tokens: number,
+): DistributionDetails {
+  const maxAvailable = availableProperties(context.startIndex);
+  const clampedProperties = Math.min(properties, maxAvailable);
+  const startRank =
+    clampedProperties > 0 ? context.startIndex + 1 : context.startIndex;
+  const endRank =
+    clampedProperties > 0
+      ? context.startIndex + clampedProperties
+      : context.startIndex;
+  const firstReward =
+    clampedProperties > 0
+      ? allocationForIndex(context.startIndex, context.dataGroup)
+      : 0;
+  const lastReward =
+    clampedProperties > 0
+      ? allocationForIndex(
+          context.startIndex + Math.max(clampedProperties - 1, 0),
+          context.dataGroup,
+        )
+      : 0;
+  const average = clampedProperties > 0 ? tokens / clampedProperties : 0;
+
+  return {
+    dataGroupLabel: context.dataGroup.label,
+    extractedBefore: context.startIndex,
+    startPropertyRank: clampedProperties > 0 ? startRank : 0,
+    endPropertyRank: clampedProperties > 0 ? endRank : 0,
+    availableProperties: maxAvailable,
+    firstPropertyReward: firstReward,
+    lastPropertyReward: lastReward,
+    averageTokensPerProperty: average,
   };
 }
 
@@ -299,6 +605,34 @@ function printResult(result: CalculationResult, isFromTokens: boolean) {
   console.log(
     dim + "═══════════════════════════════════════════════════" + reset,
   );
+  console.log(dim + "  Distribution:" + reset);
+  console.log(
+    `    Data Group:            ${result.distribution.dataGroupLabel}`,
+  );
+  console.log(
+    `    Extracted Before:      ${formatNumber(result.distribution.extractedBefore, 0)}`,
+  );
+  console.log(
+    `    Start Property Rank:   ${formatNumber(result.distribution.startPropertyRank, 0)}`,
+  );
+  console.log(
+    `    End Property Rank:     ${formatNumber(result.distribution.endPropertyRank, 2)}`,
+  );
+  console.log(
+    `    Available Properties:  ${formatNumber(result.distribution.availableProperties, 0)}`,
+  );
+  console.log(
+    `    First Reward:          ${formatNumber(result.distribution.firstPropertyReward, 6)} tokens`,
+  );
+  console.log(
+    `    Last Reward:           ${formatNumber(result.distribution.lastPropertyReward, 6)} tokens`,
+  );
+  console.log(
+    `    Avg Reward / Property: ${formatNumber(result.distribution.averageTokensPerProperty, 6)} tokens`,
+  );
+  console.log(
+    dim + "═══════════════════════════════════════════════════" + reset,
+  );
   console.log(dim + "  Cost Breakdown:" + reset);
   console.log(
     `    Storage:        ${formatCurrency(result.costBreakdown.storage)}`,
@@ -345,12 +679,13 @@ function printResult(result: CalculationResult, isFromTokens: boolean) {
 
 function main() {
   const options = parseCliArgs();
+  const context = buildDistributionContext(options);
 
   if (options.tokens !== undefined) {
-    const result = calculateFromTokens(options.tokens);
+    const result = calculateFromTokens(options.tokens, context);
     printResult(result, true);
   } else if (options.usd !== undefined) {
-    const result = calculateFromUsd(options.usd);
+    const result = calculateFromUsd(options.usd, context);
     printResult(result, false);
   }
 }

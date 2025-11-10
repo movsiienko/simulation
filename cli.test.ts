@@ -145,7 +145,31 @@ describe("CLI Argument Parsing", () => {
     const result = parseCliArgs();
     
     expect(result.tokens).toBe(0);
+    expect(result.extractedProperties).toBe(0);
+    expect(result.dataGroup).toBe("county");
     
+    Bun.argv = originalArgv;
+  });
+
+  test("should parse data group and extracted properties", () => {
+    const originalArgv = Bun.argv;
+    Bun.argv = [
+      "bun",
+      "cli.ts",
+      "--tokens",
+      "50",
+      "--data-group",
+      "County",
+      "--extracted-properties",
+      "10",
+    ];
+
+    const result = parseCliArgs();
+
+    expect(result.tokens).toBe(50);
+    expect(result.dataGroup).toBe("county");
+    expect(result.extractedProperties).toBe(10);
+
     Bun.argv = originalArgv;
   });
 
@@ -214,5 +238,84 @@ describe("CLI Argument Parsing", () => {
     process.exit = originalExit;
     console.error = originalError;
   });
-});
 
+  test("should reject unsupported data group", () => {
+    const originalArgv = Bun.argv;
+    const originalExit = process.exit;
+    const originalError = console.error;
+
+    let exitCode: number | undefined;
+    let errorMessage = "";
+
+    process.exit = mock((code?: number) => {
+      exitCode = code;
+      throw new Error("exit called");
+    });
+
+    console.error = mock((message: string) => {
+      errorMessage = message;
+    });
+
+    Bun.argv = [
+      "bun",
+      "cli.ts",
+      "--tokens",
+      "10",
+      "--data-group",
+      "city",
+    ];
+
+    try {
+      parseCliArgs();
+    } catch (e) {
+      // Expected to throw due to process.exit mock
+    }
+
+    expect(exitCode).toBe(1);
+    expect(errorMessage).toContain("Unsupported data group");
+
+    Bun.argv = originalArgv;
+    process.exit = originalExit;
+    console.error = originalError;
+  });
+
+  test("should reject non-integer extracted properties", () => {
+    const originalArgv = Bun.argv;
+    const originalExit = process.exit;
+    const originalError = console.error;
+
+    let exitCode: number | undefined;
+    let errorMessage = "";
+
+    process.exit = mock((code?: number) => {
+      exitCode = code;
+      throw new Error("exit called");
+    });
+
+    console.error = mock((message: string) => {
+      errorMessage = message;
+    });
+
+    Bun.argv = [
+      "bun",
+      "cli.ts",
+      "--tokens",
+      "10",
+      "--extracted-properties",
+      "1.5",
+    ];
+
+    try {
+      parseCliArgs();
+    } catch (e) {
+      // Expected to throw due to process.exit mock
+    }
+
+    expect(exitCode).toBe(1);
+    expect(errorMessage).toContain("Extracted properties must be a whole number");
+
+    Bun.argv = originalArgv;
+    process.exit = originalExit;
+    console.error = originalError;
+  });
+});
