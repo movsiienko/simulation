@@ -102,62 +102,74 @@ function calculateLabor(properties: number): {
   peoplePerWeek: number[];
 } {
   const counties = properties / PROPERTIES_PER_COUNTY;
+  const totalCountiesNeeded = Math.ceil(counties - 1e-9);
 
-  let remainingCounties = counties;
-  let weeks = 0;
+  if (totalCountiesNeeded <= 0) {
+    return { laborCost: 0, counties, weeks: 0, peoplePerWeek: [] };
+  }
+
+  const stageCounts = Array.from({ length: WEEKS_PER_COUNTY }, () => 0);
   const peoplePerWeek: number[] = [];
   let laborCost = 0;
+  let weeks = 0;
+  let countiesCompleted = 0;
+  let countiesStarted = 0;
 
-  // Track when people started working on counties (week number when they started)
-  // Each person takes 2 weeks: week 1 (unpaid training), week 2 (paid extraction)
-  const workStarts: number[] = [];
+  // Kick off week 1 by onboarding up to 5 new people for training.
+  const initialStarters = Math.min(MAX_PEOPLE_PER_WEEK, totalCountiesNeeded);
+  stageCounts[0] = initialStarters;
+  countiesStarted = initialStarters;
 
-  // Continue until all counties are processed
-  while (remainingCounties > 0 || workStarts.length > 0) {
-    weeks++;
-
-    // Check who finishes this week (started WEEKS_PER_COUNTY weeks ago) and remove them
-    const filtered = workStarts.filter(
-      (startWeek) => startWeek !== weeks - WEEKS_PER_COUNTY,
-    );
-    const finishedThisWeek = workStarts.length - filtered.length;
-    remainingCounties = Math.max(0, remainingCounties - finishedThisWeek);
-
-    // Update workStarts array
-    workStarts.length = 0;
-    workStarts.push(...filtered);
-
-    // Count people in their second week (extraction phase - paid)
-    // These are people who started exactly 1 week ago
-    const peopleExtracting = workStarts.filter(
-      (startWeek) => startWeek === weeks - 1,
-    ).length;
-
-    // Add new people (up to MAX_PEOPLE_PER_WEEK per week) if we have counties remaining
-    // We can add up to 5 people per week - keep adding until we have enough to finish all counties
-    // Each person does 1 county over 2 weeks, so we need at least remainingCounties people total
-    if (remainingCounties > 0.01) {
-      const peopleInPipeline = workStarts.length;
-      const peopleNeeded = Math.ceil(remainingCounties);
-
-      // Always add 5 people per week until we have enough people to finish all counties
-      // This ensures we keep ramping up the workforce
-      if (peopleInPipeline < peopleNeeded) {
-        const peopleToAdd = Math.min(MAX_PEOPLE_PER_WEEK, peopleNeeded - peopleInPipeline);
-        for (let i = 0; i < peopleToAdd; i++) {
-          workStarts.push(weeks);
-        }
-      }
+  while (
+    countiesCompleted < totalCountiesNeeded ||
+    stageCounts.some((count) => count > 0)
+  ) {
+    const activeWorkers = stageCounts.reduce((sum, count) => sum + count, 0);
+    if (activeWorkers === 0) {
+      break;
     }
 
-    // Track total people working this week (both training and extraction)
-    // This is the total number of people actively working (after adding new people)
-    const totalPeopleWorking = workStarts.length;
-    peoplePerWeek.push(totalPeopleWorking);
+    weeks++;
+    peoplePerWeek.push(activeWorkers);
 
-    // Cost is based on people in extraction phase (week 2, paid)
-    // Week 1 (training) is free
-    laborCost += peopleExtracting * COST_PER_PERSON_PER_WEEK;
+    const extractingThisWeek = stageCounts[WEEKS_PER_COUNTY - 1];
+    laborCost += extractingThisWeek * COST_PER_PERSON_PER_WEEK;
+
+    const finishingThisWeek = extractingThisWeek;
+    countiesCompleted = Math.min(
+      totalCountiesNeeded,
+      countiesCompleted + finishingThisWeek,
+    );
+
+    // Move everyone to the next phase of their 2-week cycle.
+    for (let stage = WEEKS_PER_COUNTY - 1; stage > 0; stage--) {
+      stageCounts[stage] = stageCounts[stage - 1];
+    }
+    stageCounts[0] = 0;
+
+    let activeInProgress = stageCounts.reduce((sum, count) => sum + count, 0);
+    countiesStarted = countiesCompleted + activeInProgress;
+    let remainingToStart = Math.max(0, totalCountiesNeeded - countiesStarted);
+
+    // People who just finished can immediately start training on a new county
+    // if there is still work left. Returning workers do not count against the
+    // weekly onboarding limit.
+    const returningWorkers = Math.min(finishingThisWeek, remainingToStart);
+    if (returningWorkers > 0) {
+      stageCounts[0] += returningWorkers;
+      activeInProgress += returningWorkers;
+      countiesStarted += returningWorkers;
+      remainingToStart -= returningWorkers;
+    }
+
+    // Bring in up to 5 brand new people this week (training capacity limit).
+    const newStarters = Math.min(MAX_PEOPLE_PER_WEEK, remainingToStart);
+    if (newStarters > 0) {
+      stageCounts[0] += newStarters;
+      activeInProgress += newStarters;
+      countiesStarted += newStarters;
+      remainingToStart -= newStarters;
+    }
   }
 
   return { laborCost, counties, weeks, peoplePerWeek };
