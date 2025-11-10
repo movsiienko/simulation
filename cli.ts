@@ -1,4 +1,3 @@
-#!/usr/bin/env bun
 import { parseArgs } from "util";
 
 interface DataGroupConfig {
@@ -383,8 +382,7 @@ function calculateLabor(
   let countiesCompleted = 0;
   let countiesStarted = 0;
 
-  const onboardingLimit =
-    maxWorkersPerWeek ?? DEFAULT_MAX_WORKERS_PER_WEEK;
+  const onboardingLimit = maxWorkersPerWeek ?? DEFAULT_MAX_WORKERS_PER_WEEK;
 
   // Kick off week 1 by onboarding up to the limit of new people for training.
   const initialStarters = Math.min(onboardingLimit, totalCountiesNeeded);
