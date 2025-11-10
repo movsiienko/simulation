@@ -72,6 +72,8 @@ const COST_PER_TOKEN = TOTAL_COST_PER_PROPERTY / TOKENS_PER_PROPERTY;
 const PROPERTIES_PER_COUNTY = 56708.373011800926;
 const COST_PER_PERSON_PER_WEEK = 2500;
 const MAX_PEOPLE_PER_WEEK = 5;
+const TRAINING_WEEKS = 5; // Each person needs 5 weeks of training
+const MAX_TRAINING_STARTS_PER_WEEK = 5; // Only 5 people can start training per week
 
 interface CalculationResult {
   properties: number;
@@ -95,25 +97,54 @@ function calculateLabor(properties: number): { laborCost: number; counties: numb
   const counties = properties / PROPERTIES_PER_COUNTY;
 
   let remainingCounties = counties;
-  let totalPeople = 0;
   let weeks = 0;
   const peoplePerWeek: number[] = [];
   let laborCost = 0;
 
-  // People accumulate: each week we can add up to 5 new people
-  // Week 1: 5 people, Week 2: 10 people, Week 3: 15 people, etc.
+  // Track when people started training (week number when they started)
+  // Each entry represents one person starting training that week
+  const trainingStarts: number[] = [];
+  // Track available workers (people who have completed training)
+  let availableWorkers = 0;
+
+  // Continue until all counties are processed
   while (remainingCounties > 0) {
     weeks++;
-    // Add up to 5 new people this week
-    totalPeople += MAX_PEOPLE_PER_WEEK;
-    peoplePerWeek.push(totalPeople);
 
-    // Each person can do 1 county per week
-    const countiesDoneThisWeek = Math.min(totalPeople, remainingCounties);
+    // Check who finishes training this week (started TRAINING_WEEKS ago)
+    const finishedThisWeek = trainingStarts.filter(startWeek => startWeek === weeks - TRAINING_WEEKS).length;
+    availableWorkers += finishedThisWeek;
+
+    // Count people still in training (started within the last TRAINING_WEEKS weeks)
+    const peopleInTraining = trainingStarts.filter(startWeek => startWeek > weeks - TRAINING_WEEKS).length;
+
+    // Start training new people (up to MAX_TRAINING_STARTS_PER_WEEK per week)
+    // Continue training until we have enough people to finish all remaining work
+    // We need at least as many people (in training + working) as counties remaining
+    const totalPeopleInPipeline = peopleInTraining + availableWorkers;
+    const peopleNeeded = Math.ceil(remainingCounties);
+
+    // Start training up to 5 people per week if we need more workers
+    if (totalPeopleInPipeline < peopleNeeded) {
+      const peopleToStartTraining = Math.min(
+        MAX_TRAINING_STARTS_PER_WEEK,
+        peopleNeeded - totalPeopleInPipeline
+      );
+      for (let i = 0; i < peopleToStartTraining; i++) {
+        trainingStarts.push(weeks);
+      }
+    }
+
+    // Each available worker can do 1 county per week
+    const countiesDoneThisWeek = Math.min(availableWorkers, remainingCounties);
     remainingCounties -= countiesDoneThisWeek;
 
-    // Cost is based on total people working this week
-    laborCost += totalPeople * COST_PER_PERSON_PER_WEEK;
+    // Track how many people are working this week (for display)
+    peoplePerWeek.push(availableWorkers);
+
+    // Cost is based on available workers (people who are working, not training)
+    // Training is free, so we only pay for workers
+    laborCost += availableWorkers * COST_PER_PERSON_PER_WEEK;
   }
 
   return { laborCost, counties, weeks, peoplePerWeek };
