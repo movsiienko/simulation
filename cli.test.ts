@@ -198,6 +198,9 @@ describe("Heartbeat calculations", () => {
     expect(result.costBreakdown.heartbeatCompute).toBeCloseTo(3000);
     expect(result.costBreakdown.heartbeatBlockchain).toBeCloseTo(13000);
     expect(result.heartbeat.weeklyTotalCost).toBeCloseTo(21000);
+    expect(result.timeline.heartbeatPeoplePerWeek.at(-1)).toBe(
+      result.heartbeat.peopleNeeded,
+    );
     expect(result.costBreakdown.total).toBeCloseTo(
       result.costBreakdown.storage +
         result.costBreakdown.awsCompute +
@@ -207,5 +210,21 @@ describe("Heartbeat calculations", () => {
         result.costBreakdown.heartbeatCompute +
         result.costBreakdown.heartbeatBlockchain,
     );
+  });
+
+  test("heartbeat staffing slows large extraction timelines", () => {
+    const result = buildCalculationResult({
+      properties: 150_000_000,
+      context: { startIndex: 0, dataGroup: { label: "County" } },
+    });
+
+    expect(result.timeline.weeks).toBe(49);
+    expect(result.timeline.heartbeatPeoplePerWeek.some((count) => count > 0)).toBe(
+      true,
+    );
+    expect(result.timeline.heartbeatPeoplePerWeek.at(-1)).toBe(
+      result.heartbeat.peopleNeeded,
+    );
+    expect(result.timeline.heartbeatPeoplePerWeek.at(-1)).toBe(30);
   });
 });

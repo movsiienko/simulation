@@ -205,6 +205,7 @@ interface CalculationResult {
     counties: number;
     weeks: number;
     peoplePerWeek: number[];
+    heartbeatPeoplePerWeek: number[];
   };
   distribution: DistributionDetails;
   heartbeat: HeartbeatSummary;
@@ -227,20 +228,30 @@ function calculateLabor(
   counties: number;
   weeks: number;
   peoplePerWeek: number[];
+  heartbeatPeoplePerWeek: number[];
 } {
   const counties = properties / PROPERTIES_PER_COUNTY;
   const totalCountiesNeeded = Math.ceil(counties - 1e-9);
 
   if (totalCountiesNeeded <= 0) {
-    return { laborCost: 0, counties, weeks: 0, peoplePerWeek: [] };
+    return {
+      laborCost: 0,
+      counties,
+      weeks: 0,
+      peoplePerWeek: [],
+      heartbeatPeoplePerWeek: [],
+    };
   }
 
   const stageCounts = Array.from({ length: WEEKS_PER_COUNTY }, () => 0);
   const peoplePerWeek: number[] = [];
+  const heartbeatPeoplePerWeek: number[] = [];
   let laborCost = 0;
   let weeks = 0;
   let countiesCompleted = 0;
   let countiesStarted = 0;
+  let propertiesCompleted = 0;
+  let heartbeatPeople = 0;
 
   const totalWorkerLimit = maxTotalWorkers ?? DEFAULT_MAX_TOTAL_WORKERS;
   let totalNewPeople = 0;
@@ -269,11 +280,20 @@ function calculateLabor(
     const extractingThisWeek = stageCounts[WEEKS_PER_COUNTY - 1];
     laborCost += extractingThisWeek * COST_PER_PERSON_PER_WEEK;
 
-    const finishingThisWeek = extractingThisWeek;
+    const finishingThisWeek = Math.min(
+      extractingThisWeek,
+      totalCountiesNeeded - countiesCompleted,
+    );
     countiesCompleted = Math.min(
       totalCountiesNeeded,
       countiesCompleted + finishingThisWeek,
     );
+
+    const potentialPropertiesCompleted = Math.min(
+      properties,
+      propertiesCompleted + finishingThisWeek * PROPERTIES_PER_COUNTY,
+    );
+    propertiesCompleted = potentialPropertiesCompleted;
 
     for (let stage = WEEKS_PER_COUNTY - 1; stage > 0; stage--) {
       stageCounts[stage] = stageCounts[stage - 1];
@@ -284,13 +304,32 @@ function calculateLabor(
     countiesStarted = countiesCompleted + activeInProgress;
     let remainingToStart = Math.max(0, totalCountiesNeeded - countiesStarted);
 
-    const returningWorkers = Math.min(finishingThisWeek, remainingToStart);
+    const heartbeatNeeded =
+      propertiesCompleted === 0
+        ? 0
+        : Math.ceil(
+            propertiesCompleted / HEARTBEAT_PROPERTIES_PER_PERSON_PER_WEEK,
+          );
+    const additionalHeartbeatNeeded = Math.max(
+      0,
+      heartbeatNeeded - heartbeatPeople,
+    );
+    const workersToHeartbeat = Math.min(
+      additionalHeartbeatNeeded,
+      Math.max(0, finishingThisWeek),
+    );
+    heartbeatPeople += workersToHeartbeat;
+
+    let returningWorkers = Math.max(0, finishingThisWeek - workersToHeartbeat);
+    returningWorkers = Math.min(returningWorkers, remainingToStart);
     if (returningWorkers > 0) {
       stageCounts[0] += returningWorkers;
       activeInProgress += returningWorkers;
       countiesStarted += returningWorkers;
       remainingToStart -= returningWorkers;
     }
+
+    heartbeatPeoplePerWeek.push(heartbeatPeople);
 
     const remainingNewPeopleCapacity = Math.max(
       0,
@@ -310,7 +349,13 @@ function calculateLabor(
     }
   }
 
-  return { laborCost, counties, weeks, peoplePerWeek };
+  return {
+    laborCost,
+    counties,
+    weeks,
+    peoplePerWeek,
+    heartbeatPeoplePerWeek,
+  };
 }
 
 function calculateHeartbeat(properties: number): HeartbeatSummary {
@@ -370,7 +415,13 @@ function buildCalculationResult({
   const awsComputeCost = clampedProperties * AWS_COMPUTE_COST_PER_PROPERTY;
   const blockchainGasCost =
     clampedProperties * BLOCKCHAIN_GAS_COST_PER_PROPERTY;
-  const { laborCost, counties, weeks, peoplePerWeek } = calculateLabor(
+  const {
+    laborCost,
+    counties,
+    weeks,
+    peoplePerWeek,
+    heartbeatPeoplePerWeek,
+  } = calculateLabor(
     clampedProperties,
     maxTotalWorkers,
   );
@@ -400,6 +451,7 @@ function buildCalculationResult({
       counties,
       weeks,
       peoplePerWeek,
+      heartbeatPeoplePerWeek,
     },
     distribution,
     heartbeat,
@@ -523,6 +575,23 @@ function printResult(result: CalculationResult) {
       )
       .join("\n    ");
     console.log(`    Schedule:\n    ${weekDetails}`);
+  }
+  const heartbeatTimeline = result.timeline.heartbeatPeoplePerWeek;
+  if (heartbeatTimeline.length > 0) {
+    const maxHeartbeat = heartbeatTimeline.reduce(
+      (max, val) => Math.max(max, val),
+      0,
+    );
+    const maxWeek = heartbeatTimeline.findIndex((count) => count === maxHeartbeat);
+    const firstActiveWeek = heartbeatTimeline.findIndex((count) => count > 0);
+    const finalHeartbeat = heartbeatTimeline[heartbeatTimeline.length - 1] ?? 0;
+    if (maxHeartbeat > 0) {
+      const displayFirstWeek = firstActiveWeek >= 0 ? firstActiveWeek + 1 : "n/a";
+      const displayMaxWeek = maxWeek >= 0 ? maxWeek + 1 : "n/a";
+      console.log(
+        `    Heartbeat Ramp: first active week ${displayFirstWeek}, max ${maxHeartbeat} people (week ${displayMaxWeek}), final ${finalHeartbeat} people`,
+      );
+    }
   }
   console.log(
     "═══════════════════════════════════════════════════\n",
