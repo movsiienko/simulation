@@ -53,7 +53,7 @@ describe("CLI Argument Parsing", () => {
     });
   });
 
-  test("should parse data group, extracted properties, and max workers", () => {
+  test("should parse data group, extracted properties, max workers, and onboarding cap", () => {
     withMockedArgv(
       [
         "bun",
@@ -66,6 +66,8 @@ describe("CLI Argument Parsing", () => {
         "10",
         "--max-workers",
         "8",
+        "--max-new-people",
+        "7",
       ],
       () => {
         const result = parseCliArgs();
@@ -73,6 +75,7 @@ describe("CLI Argument Parsing", () => {
         expect(result.dataGroup).toBe("school");
         expect(result.extractedProperties).toBe(10);
         expect(result.maxTotalWorkers).toBe(8);
+        expect(result.maxNewPeoplePerWeek).toBe(7);
       },
     );
   });
@@ -83,6 +86,16 @@ describe("CLI Argument Parsing", () => {
       () => {
         const result = parseCliArgs();
         expect(result.maxTotalWorkers).toBe(12);
+      },
+    );
+  });
+
+  test("should accept short flag for max new people", () => {
+    withMockedArgv(
+      ["bun", "cli.ts", "--properties", "40", "-n", "3"],
+      () => {
+        const result = parseCliArgs();
+        expect(result.maxNewPeoplePerWeek).toBe(3);
       },
     );
   });
@@ -180,6 +193,25 @@ describe("CLI Argument Parsing", () => {
           expect(() => parseCliArgs()).toThrow("exit called");
           expect(ctx.exitCode).toBe(1);
           expect(ctx.errorMessage).toContain("Invalid max workers value");
+        },
+      );
+    });
+  });
+
+  test("should reject invalid max new people value", () => {
+    withMockedExit((ctx) => {
+      withMockedArgv(
+        [
+          "bun",
+          "cli.ts",
+          "--properties",
+          "10",
+          "--max-new-people=-1",
+        ],
+        () => {
+          expect(() => parseCliArgs()).toThrow("exit called");
+          expect(ctx.exitCode).toBe(1);
+          expect(ctx.errorMessage).toContain("Invalid max new people value");
         },
       );
     });

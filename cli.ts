@@ -28,6 +28,7 @@ interface CliOptions {
   extractedProperties: number;
   dataGroup: DataGroupKey;
   maxTotalWorkers?: number;
+  maxNewPeoplePerWeek?: number;
 }
 
 const TOTAL_PROPERTIES = 150_000_000;
@@ -43,7 +44,7 @@ const TOTAL_COST_PER_PROPERTY =
 
 // Labor constants
 const COST_PER_PERSON_PER_WEEK = 2500;
-const MAX_NEW_PEOPLE_PER_WEEK = 5;
+const DEFAULT_MAX_NEW_PEOPLE_PER_WEEK = 5;
 const DEFAULT_MAX_TOTAL_WORKERS = Number.POSITIVE_INFINITY;
 const HEARTBEAT_PROPERTIES_PER_PERSON_PER_WEEK = 5_000_000;
 const HEARTBEAT_LABOR_COST_PER_PERSON_PER_WEEK = COST_PER_PERSON_PER_WEEK;
@@ -121,6 +122,10 @@ function parseCliArgs(): CliOptions {
       "max-workers": {
         type: "string",
         short: "w",
+      },
+      "max-new-people": {
+        type: "string",
+        short: "n",
       },
     },
     strict: true,
@@ -206,11 +211,27 @@ function parseCliArgs(): CliOptions {
     }
   }
 
+  let maxNewPeoplePerWeek: number | undefined;
+  if (values["max-new-people"] !== undefined) {
+    maxNewPeoplePerWeek = Number(values["max-new-people"]);
+    if (
+      !Number.isFinite(maxNewPeoplePerWeek) ||
+      !Number.isInteger(maxNewPeoplePerWeek) ||
+      maxNewPeoplePerWeek <= 0
+    ) {
+      console.error(
+        `Error: Invalid max new people value: ${values["max-new-people"]}. It must be a positive whole number.`,
+      );
+      process.exit(1);
+    }
+  }
+
   return {
     properties,
     extractedProperties,
     dataGroup: dataGroupInput as DataGroupKey,
     maxTotalWorkers,
+    maxNewPeoplePerWeek,
   } satisfies CliOptions;
 }
 
@@ -291,6 +312,12 @@ interface WorkerContext {
   newPeopleThisWeek: number;
   totalNewPeople: number;
   totalWorkerLimit: number;
+  weeklyOnboardingLimit: number;
+}
+
+interface LaborOptions {
+  maxTotalWorkers?: number;
+  maxNewPeoplePerWeek?: number;
 }
 
 function buildTierWorkloads(
@@ -388,7 +415,7 @@ function assignWorkersToTier(
   );
   const remainingWeeklyCapacity = Math.max(
     0,
-    MAX_NEW_PEOPLE_PER_WEEK - context.newPeopleThisWeek,
+    context.weeklyOnboardingLimit - context.newPeopleThisWeek,
   );
   const newStarters = Math.min(
     remainingToStart,
@@ -406,7 +433,7 @@ function assignWorkersToTier(
 function calculateLabor(
   workloads: TierWorkload[],
   totalProperties: number,
-  maxTotalWorkers?: number,
+  options: LaborOptions = {},
 ): {
   laborCost: number;
   counties: number;
@@ -429,11 +456,17 @@ function calculateLabor(
     };
   }
 
+  const {
+    maxTotalWorkers,
+    maxNewPeoplePerWeek = DEFAULT_MAX_NEW_PEOPLE_PER_WEEK,
+  } = options;
+
   const workerContext: WorkerContext = {
     idleWorkers: 0,
     newPeopleThisWeek: 0,
     totalNewPeople: 0,
     totalWorkerLimit: maxTotalWorkers ?? DEFAULT_MAX_TOTAL_WORKERS,
+    weeklyOnboardingLimit: maxNewPeoplePerWeek,
   };
 
   let tierIndex = 0;
@@ -621,12 +654,14 @@ interface ResultBuilderOptions {
   properties: number;
   context: DistributionContext;
   maxTotalWorkers?: number;
+  maxNewPeoplePerWeek?: number;
 }
 
 function buildCalculationResult({
   properties,
   context,
   maxTotalWorkers,
+  maxNewPeoplePerWeek,
 }: ResultBuilderOptions): CalculationResult {
   const clampedProperties = Math.min(
     properties,
@@ -650,7 +685,7 @@ function buildCalculationResult({
   } = calculateLabor(
     tierWorkloads,
     clampedProperties,
-    maxTotalWorkers,
+    { maxTotalWorkers, maxNewPeoplePerWeek },
   );
   const heartbeat = calculateHeartbeat(clampedProperties);
   const totalCost =
@@ -858,6 +893,7 @@ function main() {
     properties: options.properties,
     context,
     maxTotalWorkers: options.maxTotalWorkers,
+    maxNewPeoplePerWeek: options.maxNewPeoplePerWeek,
   });
   printResult(result);
 }
