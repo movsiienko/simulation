@@ -218,7 +218,7 @@ describe("Heartbeat calculations", () => {
       context: { startIndex: 0, dataGroup: { label: "County" } },
     });
 
-    expect(result.timeline.weeks).toBe(49);
+    expect(result.timeline.weeks).toBe(64);
     expect(result.timeline.heartbeatPeoplePerWeek.some((count) => count > 0)).toBe(
       true,
     );

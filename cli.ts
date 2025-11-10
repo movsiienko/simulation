@@ -42,15 +42,65 @@ const TOTAL_COST_PER_PROPERTY =
   BLOCKCHAIN_GAS_COST_PER_PROPERTY;
 
 // Labor constants
-const PROPERTIES_PER_COUNTY = 56708.373011800926;
 const COST_PER_PERSON_PER_WEEK = 2500;
-const WEEKS_PER_COUNTY = 2; // 2 weeks per county (1 week unpaid training + 1 week paid extraction)
 const MAX_NEW_PEOPLE_PER_WEEK = 5;
 const DEFAULT_MAX_TOTAL_WORKERS = Number.POSITIVE_INFINITY;
 const HEARTBEAT_PROPERTIES_PER_PERSON_PER_WEEK = 5_000_000;
 const HEARTBEAT_LABOR_COST_PER_PERSON_PER_WEEK = COST_PER_PERSON_PER_WEEK;
 const HEARTBEAT_COMPUTE_COST_PER_PROPERTY = AWS_COMPUTE_COST_PER_PROPERTY;
 const HEARTBEAT_BLOCKCHAIN_COST_PER_PROPERTY = BLOCKCHAIN_GAS_COST_PER_PROPERTY;
+const TICKS_PER_WEEK = 6; // 1 tick = ~1.17 days; supports half-week granularity
+
+interface AvailabilityTierConfig {
+  key: "high" | "medium" | "low";
+  label: string;
+  totalProperties: number;
+  totalCounties: number;
+  propertiesPerCounty: number;
+  trainingWeeksPerCounty: number;
+  productionWeeksPerCounty: number;
+}
+
+function createTier(config: {
+  key: AvailabilityTierConfig["key"];
+  label: string;
+  totalProperties: number;
+  totalCounties: number;
+  trainingWeeksPerCounty: number;
+  productionWeeksPerCounty: number;
+}): AvailabilityTierConfig {
+  return {
+    ...config,
+    propertiesPerCounty: config.totalProperties / config.totalCounties,
+  } satisfies AvailabilityTierConfig;
+}
+
+const AVAILABILITY_TIERS = [
+  createTier({
+    key: "high",
+    label: "High",
+    totalProperties: 110_524_619,
+    totalCounties: 1_949,
+    trainingWeeksPerCounty: 1,
+    productionWeeksPerCounty: 0.5,
+  }),
+  createTier({
+    key: "medium",
+    label: "Medium",
+    totalProperties: 20_188_349,
+    totalCounties: 635,
+    trainingWeeksPerCounty: 5 / 3, // train 3/5 of a county per week
+    productionWeeksPerCounty: 2 / 3, // produce 1.5 trained counties per week
+  }),
+  createTier({
+    key: "low",
+    label: "Low",
+    totalProperties: 15_305_922,
+    totalCounties: 504,
+    trainingWeeksPerCounty: 5,
+    productionWeeksPerCounty: 1,
+  }),
+] as const;
 
 function parseCliArgs(): CliOptions {
   const { values } = parseArgs({
@@ -220,8 +270,142 @@ interface DistributionDetails {
   remainingAfterPlan: number;
 }
 
-function calculateLabor(
+interface TierWorkload {
+  tier: AvailabilityTierConfig;
+  properties: number;
+  countiesFloat: number;
+  countiesNeeded: number;
+}
+
+interface TierState {
+  workload: TierWorkload;
+  trainingTicks: number;
+  productionTicks: number;
+  stageLength: number;
+  countiesCompletedInt: number;
+  propertiesCompleted: number;
+}
+
+interface WorkerContext {
+  idleWorkers: number;
+  newPeopleThisWeek: number;
+  totalNewPeople: number;
+  totalWorkerLimit: number;
+}
+
+function buildTierWorkloads(
   properties: number,
+  extractedProperties: number,
+): TierWorkload[] {
+  let remainingPlan = properties;
+  let remainingExtracted = extractedProperties;
+  const workloads: TierWorkload[] = [];
+
+  for (const tier of AVAILABILITY_TIERS) {
+    const alreadyExtractedHere = Math.min(remainingExtracted, tier.totalProperties);
+    remainingExtracted -= alreadyExtractedHere;
+
+    const tierRemainingProperties = tier.totalProperties - alreadyExtractedHere;
+    if (tierRemainingProperties <= 0) {
+      continue;
+    }
+
+    if (remainingPlan <= 0) {
+      break;
+    }
+
+    const tierPropertiesToPlan = Math.min(remainingPlan, tierRemainingProperties);
+    if (tierPropertiesToPlan <= 0) {
+      continue;
+    }
+
+    const countiesFloat = tierPropertiesToPlan / tier.propertiesPerCounty;
+    const countiesNeeded = Math.ceil(countiesFloat - 1e-9);
+
+    workloads.push({
+      tier,
+      properties: tierPropertiesToPlan,
+      countiesFloat,
+      countiesNeeded,
+    });
+
+    remainingPlan -= tierPropertiesToPlan;
+  }
+
+  return workloads;
+}
+
+function initializeTierState(workload: TierWorkload): TierState {
+  const trainingTicks = Math.max(
+    1,
+    Math.round(workload.tier.trainingWeeksPerCounty * TICKS_PER_WEEK),
+  );
+  const productionTicks = Math.max(
+    1,
+    Math.round(workload.tier.productionWeeksPerCounty * TICKS_PER_WEEK),
+  );
+  const stageLength = trainingTicks + productionTicks;
+
+  return {
+    workload,
+    trainingTicks,
+    productionTicks,
+    stageLength,
+    countiesCompletedInt: 0,
+    propertiesCompleted: 0,
+  } satisfies TierState;
+}
+
+function assignWorkersToTier(
+  tierState: TierState,
+  stageCounts: number[],
+  context: WorkerContext,
+) {
+  const activeInProgress = stageCounts.reduce((sum, count) => sum + count, 0);
+  const countiesStarted = Math.min(
+    tierState.workload.countiesNeeded,
+    tierState.countiesCompletedInt + activeInProgress,
+  );
+  let remainingToStart = tierState.workload.countiesNeeded - countiesStarted;
+  if (remainingToStart <= 0) {
+    return;
+  }
+
+  const fromIdle = Math.min(context.idleWorkers, remainingToStart);
+  if (fromIdle > 0) {
+    stageCounts[0] += fromIdle;
+    context.idleWorkers -= fromIdle;
+    remainingToStart -= fromIdle;
+  }
+
+  if (remainingToStart <= 0) {
+    return;
+  }
+
+  const remainingNewCapacity = Math.max(
+    0,
+    context.totalWorkerLimit - context.totalNewPeople,
+  );
+  const remainingWeeklyCapacity = Math.max(
+    0,
+    MAX_NEW_PEOPLE_PER_WEEK - context.newPeopleThisWeek,
+  );
+  const newStarters = Math.min(
+    remainingToStart,
+    remainingNewCapacity,
+    remainingWeeklyCapacity,
+  );
+
+  if (newStarters > 0) {
+    stageCounts[0] += newStarters;
+    context.totalNewPeople += newStarters;
+    context.newPeopleThisWeek += newStarters;
+  }
+}
+
+function calculateLabor(
+  workloads: TierWorkload[],
+  totalProperties: number,
   maxTotalWorkers?: number,
 ): {
   laborCost: number;
@@ -230,80 +414,106 @@ function calculateLabor(
   peoplePerWeek: number[];
   heartbeatPeoplePerWeek: number[];
 } {
-  const counties = properties / PROPERTIES_PER_COUNTY;
-  const totalCountiesNeeded = Math.ceil(counties - 1e-9);
+  const totalCountiesFloat = workloads.reduce(
+    (sum, workload) => sum + workload.countiesFloat,
+    0,
+  );
 
-  if (totalCountiesNeeded <= 0) {
+  if (workloads.length === 0) {
     return {
       laborCost: 0,
-      counties,
+      counties: totalCountiesFloat,
       weeks: 0,
       peoplePerWeek: [],
       heartbeatPeoplePerWeek: [],
     };
   }
 
-  const stageCounts = Array.from({ length: WEEKS_PER_COUNTY }, () => 0);
+  const workerContext: WorkerContext = {
+    idleWorkers: 0,
+    newPeopleThisWeek: 0,
+    totalNewPeople: 0,
+    totalWorkerLimit: maxTotalWorkers ?? DEFAULT_MAX_TOTAL_WORKERS,
+  };
+
+  let tierIndex = 0;
+  let currentTierState: TierState | undefined = initializeTierState(
+    workloads[tierIndex],
+  );
+  let stageCounts = new Array(currentTierState.stageLength).fill(0);
+  assignWorkersToTier(currentTierState, stageCounts, workerContext);
+
   const peoplePerWeek: number[] = [];
   const heartbeatPeoplePerWeek: number[] = [];
   let laborCost = 0;
-  let weeks = 0;
-  let countiesCompleted = 0;
-  let countiesStarted = 0;
   let propertiesCompleted = 0;
   let heartbeatPeople = 0;
+  let tickCount = 0;
+  let weekTickCounter = 0;
+  let accumulatedActiveWorkers = 0;
 
-  const totalWorkerLimit = maxTotalWorkers ?? DEFAULT_MAX_TOTAL_WORKERS;
-  let totalNewPeople = 0;
+  const tickDuration = 1 / TICKS_PER_WEEK;
 
-  const initialStarters = Math.min(
-    MAX_NEW_PEOPLE_PER_WEEK,
-    totalCountiesNeeded,
-    totalWorkerLimit,
-  );
-  stageCounts[0] = initialStarters;
-  countiesStarted = initialStarters;
-  totalNewPeople = initialStarters;
+  while (currentTierState) {
+    assignWorkersToTier(currentTierState, stageCounts, workerContext);
 
-  while (
-    countiesCompleted < totalCountiesNeeded ||
-    stageCounts.some((count) => count > 0)
-  ) {
     const activeWorkers = stageCounts.reduce((sum, count) => sum + count, 0);
+    const tierFinished =
+      currentTierState.countiesCompletedInt >=
+        currentTierState.workload.countiesNeeded &&
+      activeWorkers === 0;
+
+    if (tierFinished) {
+      tierIndex++;
+      if (tierIndex >= workloads.length) {
+        break;
+      }
+      currentTierState = initializeTierState(workloads[tierIndex]);
+      stageCounts = new Array(currentTierState.stageLength).fill(0);
+      assignWorkersToTier(currentTierState, stageCounts, workerContext);
+      continue;
+    }
+
     if (activeWorkers === 0) {
       break;
     }
 
-    weeks++;
-    peoplePerWeek.push(activeWorkers);
+    tickCount++;
+    weekTickCounter++;
+    accumulatedActiveWorkers += activeWorkers;
 
-    const extractingThisWeek = stageCounts[WEEKS_PER_COUNTY - 1];
-    laborCost += extractingThisWeek * COST_PER_PERSON_PER_WEEK;
+    const productionWorkers = stageCounts
+      .slice(currentTierState.trainingTicks)
+      .reduce((sum, count) => sum + count, 0);
+    laborCost += productionWorkers * COST_PER_PERSON_PER_WEEK * tickDuration;
 
-    const finishingThisWeek = Math.min(
-      extractingThisWeek,
-      totalCountiesNeeded - countiesCompleted,
-    );
-    countiesCompleted = Math.min(
-      totalCountiesNeeded,
-      countiesCompleted + finishingThisWeek,
-    );
+    const finishingThisTick = stageCounts[stageCounts.length - 1];
 
-    const potentialPropertiesCompleted = Math.min(
-      properties,
-      propertiesCompleted + finishingThisWeek * PROPERTIES_PER_COUNTY,
-    );
-    propertiesCompleted = potentialPropertiesCompleted;
-
-    for (let stage = WEEKS_PER_COUNTY - 1; stage > 0; stage--) {
+    for (let stage = stageCounts.length - 1; stage > 0; stage--) {
       stageCounts[stage] = stageCounts[stage - 1];
     }
     stageCounts[0] = 0;
 
-    let activeInProgress = stageCounts.reduce((sum, count) => sum + count, 0);
-    countiesStarted = countiesCompleted + activeInProgress;
-    let remainingToStart = Math.max(0, totalCountiesNeeded - countiesStarted);
+    const tierRemainingCounties = Math.max(
+      0,
+      currentTierState.workload.countiesNeeded -
+        currentTierState.countiesCompletedInt,
+    );
+    const finishingCounties = Math.min(finishingThisTick, tierRemainingCounties);
+    currentTierState.countiesCompletedInt += finishingCounties;
 
+    const propertiesGain = Math.min(
+      currentTierState.workload.properties -
+        currentTierState.propertiesCompleted,
+      finishingCounties * currentTierState.workload.tier.propertiesPerCounty,
+    );
+    currentTierState.propertiesCompleted += propertiesGain;
+    propertiesCompleted = Math.min(
+      totalProperties,
+      propertiesCompleted + propertiesGain,
+    );
+
+    let returningWorkers = finishingThisTick;
     const heartbeatNeeded =
       propertiesCompleted === 0
         ? 0
@@ -316,42 +526,54 @@ function calculateLabor(
     );
     const workersToHeartbeat = Math.min(
       additionalHeartbeatNeeded,
-      Math.max(0, finishingThisWeek),
+      returningWorkers,
     );
-    heartbeatPeople += workersToHeartbeat;
-
-    let returningWorkers = Math.max(0, finishingThisWeek - workersToHeartbeat);
-    returningWorkers = Math.min(returningWorkers, remainingToStart);
-    if (returningWorkers > 0) {
-      stageCounts[0] += returningWorkers;
-      activeInProgress += returningWorkers;
-      countiesStarted += returningWorkers;
-      remainingToStart -= returningWorkers;
+    if (workersToHeartbeat > 0) {
+      heartbeatPeople += workersToHeartbeat;
+      returningWorkers -= workersToHeartbeat;
     }
 
-    heartbeatPeoplePerWeek.push(heartbeatPeople);
+    const postShiftActive = stageCounts.reduce((sum, count) => sum + count, 0);
+    const countiesStarted = Math.min(
+      currentTierState.workload.countiesNeeded,
+      currentTierState.countiesCompletedInt + postShiftActive,
+    );
+    let remainingToStart = currentTierState.workload.countiesNeeded - countiesStarted;
 
-    const remainingNewPeopleCapacity = Math.max(
-      0,
-      totalWorkerLimit - totalNewPeople,
-    );
-    const newStarters = Math.min(
-      MAX_NEW_PEOPLE_PER_WEEK,
-      remainingNewPeopleCapacity,
-      remainingToStart,
-    );
-    if (newStarters > 0) {
-      stageCounts[0] += newStarters;
-      activeInProgress += newStarters;
-      countiesStarted += newStarters;
-      remainingToStart -= newStarters;
-      totalNewPeople += newStarters;
+    if (returningWorkers > 0 && remainingToStart > 0) {
+      const reassignments = Math.min(returningWorkers, remainingToStart);
+      stageCounts[0] += reassignments;
+      returningWorkers -= reassignments;
+      remainingToStart -= reassignments;
+    }
+
+    if (returningWorkers > 0) {
+      workerContext.idleWorkers += returningWorkers;
+    }
+
+    if (remainingToStart > 0) {
+      assignWorkersToTier(currentTierState, stageCounts, workerContext);
+    }
+
+    if (weekTickCounter === TICKS_PER_WEEK) {
+      peoplePerWeek.push(accumulatedActiveWorkers / TICKS_PER_WEEK);
+      heartbeatPeoplePerWeek.push(heartbeatPeople);
+      accumulatedActiveWorkers = 0;
+      weekTickCounter = 0;
+      workerContext.newPeopleThisWeek = 0;
     }
   }
 
+  if (weekTickCounter > 0) {
+    peoplePerWeek.push(accumulatedActiveWorkers / weekTickCounter);
+    heartbeatPeoplePerWeek.push(heartbeatPeople);
+  }
+
+  const weeks = peoplePerWeek.length;
+
   return {
     laborCost,
-    counties,
+    counties: totalCountiesFloat,
     weeks,
     peoplePerWeek,
     heartbeatPeoplePerWeek,
@@ -415,6 +637,10 @@ function buildCalculationResult({
   const awsComputeCost = clampedProperties * AWS_COMPUTE_COST_PER_PROPERTY;
   const blockchainGasCost =
     clampedProperties * BLOCKCHAIN_GAS_COST_PER_PROPERTY;
+  const tierWorkloads = buildTierWorkloads(
+    clampedProperties,
+    context.startIndex,
+  );
   const {
     laborCost,
     counties,
@@ -422,6 +648,7 @@ function buildCalculationResult({
     peoplePerWeek,
     heartbeatPeoplePerWeek,
   } = calculateLabor(
+    tierWorkloads,
     clampedProperties,
     maxTotalWorkers,
   );
