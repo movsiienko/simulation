@@ -8,7 +8,7 @@ describe("CLI Argument Parsing", () => {
     
     const result = parseCliArgs();
     
-    expect(result.tokens).toBe("100");
+    expect(result.tokens).toBe(100);
     expect(result.usd).toBeUndefined();
     
     Bun.argv = originalArgv;
@@ -20,7 +20,7 @@ describe("CLI Argument Parsing", () => {
     
     const result = parseCliArgs();
     
-    expect(result.tokens).toBe("50.5");
+    expect(result.tokens).toBe(50.5);
     expect(result.usd).toBeUndefined();
     
     Bun.argv = originalArgv;
@@ -32,7 +32,7 @@ describe("CLI Argument Parsing", () => {
     
     const result = parseCliArgs();
     
-    expect(result.usd).toBe("200");
+    expect(result.usd).toBe(200);
     expect(result.tokens).toBeUndefined();
     
     Bun.argv = originalArgv;
@@ -44,7 +44,7 @@ describe("CLI Argument Parsing", () => {
     
     const result = parseCliArgs();
     
-    expect(result.usd).toBe("75.25");
+    expect(result.usd).toBe(75.25);
     expect(result.tokens).toBeUndefined();
     
     Bun.argv = originalArgv;
@@ -122,7 +122,7 @@ describe("CLI Argument Parsing", () => {
     
     const result = parseCliArgs();
     
-    expect(result.tokens).toBe("123.456");
+    expect(result.tokens).toBe(123.456);
     
     Bun.argv = originalArgv;
   });
@@ -133,7 +133,7 @@ describe("CLI Argument Parsing", () => {
     
     const result = parseCliArgs();
     
-    expect(result.usd).toBe("99.99");
+    expect(result.usd).toBe(99.99);
     
     Bun.argv = originalArgv;
   });
@@ -144,9 +144,75 @@ describe("CLI Argument Parsing", () => {
     
     const result = parseCliArgs();
     
-    expect(result.tokens).toBe("0");
+    expect(result.tokens).toBe(0);
     
     Bun.argv = originalArgv;
+  });
+
+  test("should reject invalid token values", () => {
+    const originalArgv = Bun.argv;
+    const originalExit = process.exit;
+    const originalError = console.error;
+    
+    let exitCode: number | undefined;
+    let errorMessage = "";
+    
+    process.exit = mock((code?: number) => {
+      exitCode = code;
+      throw new Error("exit called");
+    });
+    
+    console.error = mock((message: string) => {
+      errorMessage = message;
+    });
+    
+    Bun.argv = ["bun", "cli.ts", "--tokens", "invalid"];
+    
+    try {
+      parseCliArgs();
+    } catch (e) {
+      // Expected to throw due to process.exit mock
+    }
+    
+    expect(exitCode).toBe(1);
+    expect(errorMessage).toContain("Invalid token amount");
+    
+    Bun.argv = originalArgv;
+    process.exit = originalExit;
+    console.error = originalError;
+  });
+
+  test("should reject invalid usd values", () => {
+    const originalArgv = Bun.argv;
+    const originalExit = process.exit;
+    const originalError = console.error;
+    
+    let exitCode: number | undefined;
+    let errorMessage = "";
+    
+    process.exit = mock((code?: number) => {
+      exitCode = code;
+      throw new Error("exit called");
+    });
+    
+    console.error = mock((message: string) => {
+      errorMessage = message;
+    });
+    
+    Bun.argv = ["bun", "cli.ts", "--usd", "not-a-number"];
+    
+    try {
+      parseCliArgs();
+    } catch (e) {
+      // Expected to throw due to process.exit mock
+    }
+    
+    expect(exitCode).toBe(1);
+    expect(errorMessage).toContain("Invalid USD amount");
+    
+    Bun.argv = originalArgv;
+    process.exit = originalExit;
+    console.error = originalError;
   });
 });
 

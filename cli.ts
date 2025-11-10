@@ -3,8 +3,8 @@
 import { parseArgs } from "util";
 
 interface CliOptions {
-  tokens?: string;
-  usd?: string;
+  tokens?: number;
+  usd?: number;
 }
 
 function parseCliArgs(): CliOptions {
@@ -38,30 +38,36 @@ function parseCliArgs(): CliOptions {
     process.exit(1);
   }
 
-  return {
-    tokens: values.tokens as string | undefined,
-    usd: values.usd as string | undefined,
-  };
+  // Parse and validate numbers
+  if (hasTokens) {
+    const tokens = parseFloat(values.tokens as string);
+    if (isNaN(tokens)) {
+      console.error(`Error: Invalid token amount: ${values.tokens}`);
+      process.exit(1);
+    }
+    return { tokens };
+  }
+
+  if (hasUsd) {
+    const usd = parseFloat(values.usd as string);
+    if (isNaN(usd)) {
+      console.error(`Error: Invalid USD amount: ${values.usd}`);
+      process.exit(1);
+    }
+    return { usd };
+  }
+
+  return {};
 }
 
 function main() {
   const options = parseCliArgs();
 
-  if (options.tokens) {
-    const tokens = parseFloat(options.tokens);
-    if (isNaN(tokens)) {
-      console.error(`Error: Invalid token amount: ${options.tokens}`);
-      process.exit(1);
-    }
-    console.log(`Token amount: ${tokens}`);
+  if (options.tokens !== undefined) {
+    console.log(`Token amount: ${options.tokens}`);
     // Add your logic here
-  } else if (options.usd) {
-    const usd = parseFloat(options.usd);
-    if (isNaN(usd)) {
-      console.error(`Error: Invalid USD amount: ${options.usd}`);
-      process.exit(1);
-    }
-    console.log(`USD amount: ${usd}`);
+  } else if (options.usd !== undefined) {
+    console.log(`USD amount: ${options.usd}`);
     // Add your logic here
   }
 }
