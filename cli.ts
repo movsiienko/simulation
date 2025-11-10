@@ -29,6 +29,8 @@ interface CliOptions {
   dataGroup: DataGroupKey;
   maxTotalWorkers?: number;
   maxNewPeoplePerWeek?: number;
+  trainingCostPerPersonPerWeek: number;
+  extractionCostPerPersonPerWeek: number;
 }
 
 const TOTAL_PROPERTIES = 150_000_000;
@@ -43,11 +45,11 @@ const TOTAL_COST_PER_PROPERTY =
   BLOCKCHAIN_GAS_COST_PER_PROPERTY;
 
 // Labor constants
-const COST_PER_PERSON_PER_WEEK = 2500;
+const DEFAULT_TRAINING_COST_PER_PERSON_PER_WEEK = 0;
+const DEFAULT_EXTRACTION_COST_PER_PERSON_PER_WEEK = 2500;
 const DEFAULT_MAX_NEW_PEOPLE_PER_WEEK = 5;
 const DEFAULT_MAX_TOTAL_WORKERS = Number.POSITIVE_INFINITY;
 const HEARTBEAT_PROPERTIES_PER_PERSON_PER_WEEK = 5_000_000;
-const HEARTBEAT_LABOR_COST_PER_PERSON_PER_WEEK = COST_PER_PERSON_PER_WEEK;
 const HEARTBEAT_COMPUTE_COST_PER_PROPERTY = AWS_COMPUTE_COST_PER_PROPERTY;
 const HEARTBEAT_BLOCKCHAIN_COST_PER_PROPERTY = BLOCKCHAIN_GAS_COST_PER_PROPERTY;
 const TICKS_PER_WEEK = 6; // 1 tick = ~1.17 days; supports half-week granularity
@@ -126,6 +128,14 @@ function parseCliArgs(): CliOptions {
       "max-new-people": {
         type: "string",
         short: "n",
+      },
+      "training-price": {
+        type: "string",
+        short: "t",
+      },
+      "extraction-price": {
+        type: "string",
+        short: "x",
       },
     },
     strict: true,
@@ -226,12 +236,44 @@ function parseCliArgs(): CliOptions {
     }
   }
 
+  let trainingCostPerPersonPerWeek =
+    DEFAULT_TRAINING_COST_PER_PERSON_PER_WEEK;
+  if (values["training-price"] !== undefined) {
+    trainingCostPerPersonPerWeek = Number(values["training-price"]);
+    if (
+      !Number.isFinite(trainingCostPerPersonPerWeek) ||
+      trainingCostPerPersonPerWeek < 0
+    ) {
+      console.error(
+        `Error: Invalid training price: ${values["training-price"]}. It must be a non-negative number.`,
+      );
+      process.exit(1);
+    }
+  }
+
+  let extractionCostPerPersonPerWeek =
+    DEFAULT_EXTRACTION_COST_PER_PERSON_PER_WEEK;
+  if (values["extraction-price"] !== undefined) {
+    extractionCostPerPersonPerWeek = Number(values["extraction-price"]);
+    if (
+      !Number.isFinite(extractionCostPerPersonPerWeek) ||
+      extractionCostPerPersonPerWeek < 0
+    ) {
+      console.error(
+        `Error: Invalid extraction price: ${values["extraction-price"]}. It must be a non-negative number.`,
+      );
+      process.exit(1);
+    }
+  }
+
   return {
     properties,
     extractedProperties,
     dataGroup: dataGroupInput as DataGroupKey,
     maxTotalWorkers,
     maxNewPeoplePerWeek,
+    trainingCostPerPersonPerWeek,
+    extractionCostPerPersonPerWeek,
   } satisfies CliOptions;
 }
 
@@ -318,6 +360,8 @@ interface WorkerContext {
 interface LaborOptions {
   maxTotalWorkers?: number;
   maxNewPeoplePerWeek?: number;
+  trainingCostPerPersonPerWeek?: number;
+  extractionCostPerPersonPerWeek?: number;
 }
 
 function buildTierWorkloads(
@@ -459,6 +503,8 @@ function calculateLabor(
   const {
     maxTotalWorkers,
     maxNewPeoplePerWeek = DEFAULT_MAX_NEW_PEOPLE_PER_WEEK,
+    trainingCostPerPersonPerWeek = DEFAULT_TRAINING_COST_PER_PERSON_PER_WEEK,
+    extractionCostPerPersonPerWeek = DEFAULT_EXTRACTION_COST_PER_PERSON_PER_WEEK,
   } = options;
 
   const workerContext: WorkerContext = {
@@ -515,10 +561,20 @@ function calculateLabor(
     weekTickCounter++;
     accumulatedActiveWorkers += activeWorkers;
 
+    const trainingWorkers =
+      currentTierState.trainingTicks > 0
+        ? stageCounts
+            .slice(0, currentTierState.trainingTicks)
+            .reduce((sum, count) => sum + count, 0)
+        : 0;
     const productionWorkers = stageCounts
       .slice(currentTierState.trainingTicks)
       .reduce((sum, count) => sum + count, 0);
-    laborCost += productionWorkers * COST_PER_PERSON_PER_WEEK * tickDuration;
+    const trainingCostThisTick =
+      trainingWorkers * trainingCostPerPersonPerWeek * tickDuration;
+    const productionCostThisTick =
+      productionWorkers * extractionCostPerPersonPerWeek * tickDuration;
+    laborCost += trainingCostThisTick + productionCostThisTick;
 
     const finishingThisTick = stageCounts[stageCounts.length - 1];
 
@@ -613,7 +669,11 @@ function calculateLabor(
   };
 }
 
-function calculateHeartbeat(properties: number): HeartbeatSummary {
+function calculateHeartbeat(
+  properties: number,
+  extractionCostPerPersonPerWeek: number =
+    DEFAULT_EXTRACTION_COST_PER_PERSON_PER_WEEK,
+): HeartbeatSummary {
   const safeProperties = Math.max(0, Math.floor(properties));
 
   if (safeProperties === 0) {
@@ -632,7 +692,7 @@ function calculateHeartbeat(properties: number): HeartbeatSummary {
     Math.ceil(safeProperties / HEARTBEAT_PROPERTIES_PER_PERSON_PER_WEEK),
   );
   const weeklyLaborCost =
-    peopleNeeded * HEARTBEAT_LABOR_COST_PER_PERSON_PER_WEEK;
+    peopleNeeded * extractionCostPerPersonPerWeek;
   const weeklyComputeCost =
     safeProperties * HEARTBEAT_COMPUTE_COST_PER_PROPERTY;
   const weeklyBlockchainCost =
@@ -655,6 +715,8 @@ interface ResultBuilderOptions {
   context: DistributionContext;
   maxTotalWorkers?: number;
   maxNewPeoplePerWeek?: number;
+  trainingCostPerPersonPerWeek?: number;
+  extractionCostPerPersonPerWeek?: number;
 }
 
 function buildCalculationResult({
@@ -662,6 +724,8 @@ function buildCalculationResult({
   context,
   maxTotalWorkers,
   maxNewPeoplePerWeek,
+  trainingCostPerPersonPerWeek = DEFAULT_TRAINING_COST_PER_PERSON_PER_WEEK,
+  extractionCostPerPersonPerWeek = DEFAULT_EXTRACTION_COST_PER_PERSON_PER_WEEK,
 }: ResultBuilderOptions): CalculationResult {
   const clampedProperties = Math.min(
     properties,
@@ -685,9 +749,17 @@ function buildCalculationResult({
   } = calculateLabor(
     tierWorkloads,
     clampedProperties,
-    { maxTotalWorkers, maxNewPeoplePerWeek },
+    {
+      maxTotalWorkers,
+      maxNewPeoplePerWeek,
+      trainingCostPerPersonPerWeek,
+      extractionCostPerPersonPerWeek,
+    },
   );
-  const heartbeat = calculateHeartbeat(clampedProperties);
+  const heartbeat = calculateHeartbeat(
+    clampedProperties,
+    extractionCostPerPersonPerWeek,
+  );
   const totalCost =
     storageCost +
     awsComputeCost +
@@ -894,6 +966,8 @@ function main() {
     context,
     maxTotalWorkers: options.maxTotalWorkers,
     maxNewPeoplePerWeek: options.maxNewPeoplePerWeek,
+    trainingCostPerPersonPerWeek: options.trainingCostPerPersonPerWeek,
+    extractionCostPerPersonPerWeek: options.extractionCostPerPersonPerWeek,
   });
   printResult(result);
 }

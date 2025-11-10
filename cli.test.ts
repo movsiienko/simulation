@@ -100,6 +100,26 @@ describe("CLI Argument Parsing", () => {
     );
   });
 
+  test("should parse training and extraction price overrides", () => {
+    withMockedArgv(
+      [
+        "bun",
+        "cli.ts",
+        "--properties",
+        "40",
+        "--training-price",
+        "750",
+        "--extraction-price",
+        "3100",
+      ],
+      () => {
+        const result = parseCliArgs();
+        expect(result.trainingCostPerPersonPerWeek).toBe(750);
+        expect(result.extractionCostPerPersonPerWeek).toBe(3100);
+      },
+    );
+  });
+
   test("should require properties value", () => {
     withMockedExit((ctx) => {
       withMockedArgv(["bun", "cli.ts"], () => {
@@ -215,6 +235,57 @@ describe("CLI Argument Parsing", () => {
         },
       );
     });
+  });
+
+  test("should reject negative training price", () => {
+    withMockedExit((ctx) => {
+      withMockedArgv(
+        [
+          "bun",
+          "cli.ts",
+          "--properties",
+          "10",
+          "--training-price=-1",
+        ],
+        () => {
+          expect(() => parseCliArgs()).toThrow("exit called");
+          expect(ctx.exitCode).toBe(1);
+          expect(ctx.errorMessage).toContain("Invalid training price");
+        },
+      );
+    });
+  });
+});
+
+describe("Cost configuration overrides", () => {
+  test("charges training stages when price provided", () => {
+    const baseline = buildCalculationResult({
+      properties: 10_000_000,
+      context: { startIndex: 0, dataGroup: { label: "County" } },
+    });
+
+    const withTrainingCost = buildCalculationResult({
+      properties: 10_000_000,
+      context: { startIndex: 0, dataGroup: { label: "County" } },
+      trainingCostPerPersonPerWeek: 1000,
+    });
+
+    expect(withTrainingCost.costBreakdown.labor).toBeGreaterThan(
+      baseline.costBreakdown.labor,
+    );
+  });
+
+  test("heartbeat labor cost follows extraction rate override", () => {
+    const extractionRate = 4000;
+    const result = buildCalculationResult({
+      properties: 10_000_000,
+      context: { startIndex: 0, dataGroup: { label: "County" } },
+      extractionCostPerPersonPerWeek: extractionRate,
+    });
+
+    expect(result.costBreakdown.heartbeatLabor).toBe(
+      result.heartbeat.peopleNeeded * extractionRate,
+    );
   });
 });
 
