@@ -162,6 +162,8 @@ describe("CLI Argument Parsing", () => {
       "County",
       "--extracted-properties",
       "10",
+      "--max-workers",
+      "8",
     ];
 
     const result = parseCliArgs();
@@ -169,6 +171,19 @@ describe("CLI Argument Parsing", () => {
     expect(result.tokens).toBe(50);
     expect(result.dataGroup).toBe("county");
     expect(result.extractedProperties).toBe(10);
+    expect(result.maxWorkersPerWeek).toBe(8);
+
+    Bun.argv = originalArgv;
+  });
+
+  test("should parse max workers with short flag", () => {
+    const originalArgv = Bun.argv;
+    Bun.argv = ["bun", "cli.ts", "--usd", "100", "-w", "12"];
+
+    const result = parseCliArgs();
+
+    expect(result.usd).toBe(100);
+    expect(result.maxWorkersPerWeek).toBe(12);
 
     Bun.argv = originalArgv;
   });
@@ -313,6 +328,39 @@ describe("CLI Argument Parsing", () => {
 
     expect(exitCode).toBe(1);
     expect(errorMessage).toContain("Extracted properties must be a whole number");
+
+    Bun.argv = originalArgv;
+    process.exit = originalExit;
+    console.error = originalError;
+  });
+
+  test("should reject invalid max workers value", () => {
+    const originalArgv = Bun.argv;
+    const originalExit = process.exit;
+    const originalError = console.error;
+
+    let exitCode: number | undefined;
+    let errorMessage = "";
+
+    process.exit = mock((code?: number) => {
+      exitCode = code;
+      throw new Error("exit called");
+    });
+
+    console.error = mock((message: string) => {
+      errorMessage = message;
+    });
+
+    Bun.argv = ["bun", "cli.ts", "--tokens", "10", "--max-workers", "0"];
+
+    try {
+      parseCliArgs();
+    } catch (e) {
+      // Expected to throw due to process.exit mock
+    }
+
+    expect(exitCode).toBe(1);
+    expect(errorMessage).toContain("Invalid max workers value");
 
     Bun.argv = originalArgv;
     process.exit = originalExit;

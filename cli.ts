@@ -28,6 +28,7 @@ interface CliOptions {
   usd?: number;
   extractedProperties: number;
   dataGroup: DataGroupKey;
+  maxWorkersPerWeek?: number;
 }
 
 interface DecayParameters {
@@ -64,6 +65,10 @@ function parseCliArgs(): CliOptions {
       "extracted-properties": {
         type: "string",
         short: "e",
+      },
+      "max-workers": {
+        type: "string",
+        short: "w",
       },
     },
     strict: true,
@@ -124,6 +129,27 @@ function parseCliArgs(): CliOptions {
     process.exit(1);
   }
 
+  let maxWorkersPerWeek: number | undefined;
+  if (values["max-workers"] !== undefined) {
+    maxWorkersPerWeek = Number(values["max-workers"]);
+    if (
+      !Number.isFinite(maxWorkersPerWeek) ||
+      !Number.isInteger(maxWorkersPerWeek) ||
+      maxWorkersPerWeek <= 0
+    ) {
+      console.error(
+        `Error: Invalid max workers value: ${values["max-workers"]}. It must be a positive whole number.`,
+      );
+      process.exit(1);
+    }
+  }
+
+  const baseOptions = {
+    extractedProperties,
+    dataGroup: dataGroupInput as DataGroupKey,
+    maxWorkersPerWeek,
+  } satisfies CliOptions;
+
   if (hasTokens) {
     const tokens = parseFloat(values.tokens as string);
     if (isNaN(tokens)) {
@@ -131,9 +157,8 @@ function parseCliArgs(): CliOptions {
       process.exit(1);
     }
     return {
+      ...baseOptions,
       tokens,
-      extractedProperties,
-      dataGroup: dataGroupInput as DataGroupKey,
     };
   }
 
@@ -144,16 +169,12 @@ function parseCliArgs(): CliOptions {
       process.exit(1);
     }
     return {
+      ...baseOptions,
       usd,
-      extractedProperties,
-      dataGroup: dataGroupInput as DataGroupKey,
     };
   }
 
-  return {
-    extractedProperties,
-    dataGroup: dataGroupInput as DataGroupKey,
-  };
+  return baseOptions;
 }
 
 interface DistributionContext {
@@ -306,7 +327,7 @@ const TOTAL_COST_PER_PROPERTY =
 const PROPERTIES_PER_COUNTY = 56708.373011800926;
 const COST_PER_PERSON_PER_WEEK = 2500;
 const WEEKS_PER_COUNTY = 2; // 2 weeks per county (1 week unpaid training + 1 week paid extraction)
-const MAX_PEOPLE_PER_WEEK = 5; // Only 5 people can start per week
+const DEFAULT_MAX_WORKERS_PER_WEEK = Number.POSITIVE_INFINITY;
 
 interface CalculationResult {
   properties: number;
@@ -338,7 +359,10 @@ interface DistributionDetails {
   averageTokensPerProperty: number;
 }
 
-function calculateLabor(properties: number): {
+function calculateLabor(
+  properties: number,
+  maxWorkersPerWeek?: number,
+): {
   laborCost: number;
   counties: number;
   weeks: number;
@@ -358,8 +382,11 @@ function calculateLabor(properties: number): {
   let countiesCompleted = 0;
   let countiesStarted = 0;
 
-  // Kick off week 1 by onboarding up to 5 new people for training.
-  const initialStarters = Math.min(MAX_PEOPLE_PER_WEEK, totalCountiesNeeded);
+  const onboardingLimit =
+    maxWorkersPerWeek ?? DEFAULT_MAX_WORKERS_PER_WEEK;
+
+  // Kick off week 1 by onboarding up to the limit of new people for training.
+  const initialStarters = Math.min(onboardingLimit, totalCountiesNeeded);
   stageCounts[0] = initialStarters;
   countiesStarted = initialStarters;
 
@@ -405,8 +432,8 @@ function calculateLabor(properties: number): {
       remainingToStart -= returningWorkers;
     }
 
-    // Bring in up to 5 brand new people this week (training capacity limit).
-    const newStarters = Math.min(MAX_PEOPLE_PER_WEEK, remainingToStart);
+    // Bring in up to the limit of brand new people this week (training capacity limit).
+    const newStarters = Math.min(onboardingLimit, remainingToStart);
     if (newStarters > 0) {
       stageCounts[0] += newStarters;
       activeInProgress += newStarters;
@@ -421,17 +448,20 @@ function calculateLabor(properties: number): {
 function calculateFromTokens(
   tokens: number,
   context: DistributionContext,
+  maxWorkersPerWeek?: number,
 ): CalculationResult {
   const properties = propertiesForTokens(tokens, context);
   return buildCalculationResult({
     properties,
     context,
+    maxWorkersPerWeek,
   });
 }
 
 function calculateFromUsd(
   usd: number,
   context: DistributionContext,
+  maxWorkersPerWeek?: number,
 ): CalculationResult {
   // We need to solve: properties * TOTAL_COST_PER_PROPERTY + laborCost = usd
   // But laborCost depends on properties, so we need to iterate or approximate
@@ -446,7 +476,7 @@ function calculateFromUsd(
   // Iterate to find the correct properties value
   while (Math.abs(properties - prevProperties) > 0.01 && iterations < 100) {
     prevProperties = properties;
-    const { laborCost } = calculateLabor(properties);
+    const { laborCost } = calculateLabor(properties, maxWorkersPerWeek);
     const nonLaborCost = properties * TOTAL_COST_PER_PROPERTY;
     const totalCost = nonLaborCost + laborCost;
     properties = properties * (usd / totalCost);
@@ -459,6 +489,7 @@ function calculateFromUsd(
     properties,
     context,
     usdOverride: usd,
+    maxWorkersPerWeek,
   });
 }
 
@@ -466,12 +497,14 @@ interface ResultBuilderOptions {
   properties: number;
   context: DistributionContext;
   usdOverride?: number;
+  maxWorkersPerWeek?: number;
 }
 
 function buildCalculationResult({
   properties,
   context,
   usdOverride,
+  maxWorkersPerWeek,
 }: ResultBuilderOptions): CalculationResult {
   const clampedProperties = Math.min(
     properties,
@@ -482,8 +515,10 @@ function buildCalculationResult({
   const awsComputeCost = clampedProperties * AWS_COMPUTE_COST_PER_PROPERTY;
   const blockchainGasCost =
     clampedProperties * BLOCKCHAIN_GAS_COST_PER_PROPERTY;
-  const { laborCost, counties, weeks, peoplePerWeek } =
-    calculateLabor(clampedProperties);
+  const { laborCost, counties, weeks, peoplePerWeek } = calculateLabor(
+    clampedProperties,
+    maxWorkersPerWeek,
+  );
   const computedTotal =
     storageCost + awsComputeCost + blockchainGasCost + laborCost;
   const usdValue = usdOverride ?? computedTotal;
@@ -682,10 +717,18 @@ function main() {
   const context = buildDistributionContext(options);
 
   if (options.tokens !== undefined) {
-    const result = calculateFromTokens(options.tokens, context);
+    const result = calculateFromTokens(
+      options.tokens,
+      context,
+      options.maxWorkersPerWeek,
+    );
     printResult(result, true);
   } else if (options.usd !== undefined) {
-    const result = calculateFromUsd(options.usd, context);
+    const result = calculateFromUsd(
+      options.usd,
+      context,
+      options.maxWorkersPerWeek,
+    );
     printResult(result, false);
   }
 }
