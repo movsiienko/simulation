@@ -47,6 +47,10 @@ const COST_PER_PERSON_PER_WEEK = 2500;
 const WEEKS_PER_COUNTY = 2; // 2 weeks per county (1 week unpaid training + 1 week paid extraction)
 const MAX_NEW_PEOPLE_PER_WEEK = 5;
 const DEFAULT_MAX_TOTAL_WORKERS = Number.POSITIVE_INFINITY;
+const HEARTBEAT_PROPERTIES_PER_PERSON_PER_WEEK = 5_000_000;
+const HEARTBEAT_LABOR_COST_PER_PERSON_PER_WEEK = COST_PER_PERSON_PER_WEEK;
+const HEARTBEAT_COMPUTE_COST_PER_PROPERTY = AWS_COMPUTE_COST_PER_PROPERTY;
+const HEARTBEAT_BLOCKCHAIN_COST_PER_PROPERTY = BLOCKCHAIN_GAS_COST_PER_PROPERTY;
 
 function parseCliArgs(): CliOptions {
   const { values } = parseArgs({
@@ -176,6 +180,15 @@ function availableProperties(startIndex: number): number {
   return Math.max(0, TOTAL_PROPERTIES - startIndex);
 }
 
+interface HeartbeatSummary {
+  properties: number;
+  peopleNeeded: number;
+  weeklyLaborCost: number;
+  weeklyComputeCost: number;
+  weeklyBlockchainCost: number;
+  weeklyTotalCost: number;
+}
+
 interface CalculationResult {
   properties: number;
   costBreakdown: {
@@ -183,6 +196,9 @@ interface CalculationResult {
     awsCompute: number;
     blockchainGas: number;
     labor: number;
+    heartbeatLabor: number;
+    heartbeatCompute: number;
+    heartbeatBlockchain: number;
     total: number;
   };
   timeline: {
@@ -191,6 +207,7 @@ interface CalculationResult {
     peoplePerWeek: number[];
   };
   distribution: DistributionDetails;
+  heartbeat: HeartbeatSummary;
 }
 
 interface DistributionDetails {
@@ -296,6 +313,43 @@ function calculateLabor(
   return { laborCost, counties, weeks, peoplePerWeek };
 }
 
+function calculateHeartbeat(properties: number): HeartbeatSummary {
+  const safeProperties = Math.max(0, Math.floor(properties));
+
+  if (safeProperties === 0) {
+    return {
+      properties: 0,
+      peopleNeeded: 0,
+      weeklyLaborCost: 0,
+      weeklyComputeCost: 0,
+      weeklyBlockchainCost: 0,
+      weeklyTotalCost: 0,
+    } satisfies HeartbeatSummary;
+  }
+
+  const peopleNeeded = Math.max(
+    1,
+    Math.ceil(safeProperties / HEARTBEAT_PROPERTIES_PER_PERSON_PER_WEEK),
+  );
+  const weeklyLaborCost =
+    peopleNeeded * HEARTBEAT_LABOR_COST_PER_PERSON_PER_WEEK;
+  const weeklyComputeCost =
+    safeProperties * HEARTBEAT_COMPUTE_COST_PER_PROPERTY;
+  const weeklyBlockchainCost =
+    safeProperties * HEARTBEAT_BLOCKCHAIN_COST_PER_PROPERTY;
+  const weeklyTotalCost =
+    weeklyLaborCost + weeklyComputeCost + weeklyBlockchainCost;
+
+  return {
+    properties: safeProperties,
+    peopleNeeded,
+    weeklyLaborCost,
+    weeklyComputeCost,
+    weeklyBlockchainCost,
+    weeklyTotalCost,
+  } satisfies HeartbeatSummary;
+}
+
 interface ResultBuilderOptions {
   properties: number;
   context: DistributionContext;
@@ -320,8 +374,13 @@ function buildCalculationResult({
     clampedProperties,
     maxTotalWorkers,
   );
+  const heartbeat = calculateHeartbeat(clampedProperties);
   const totalCost =
-    storageCost + awsComputeCost + blockchainGasCost + laborCost;
+    storageCost +
+    awsComputeCost +
+    blockchainGasCost +
+    laborCost +
+    heartbeat.weeklyTotalCost;
 
   const distribution = summarizeDistribution(clampedProperties, context);
 
@@ -332,6 +391,9 @@ function buildCalculationResult({
       awsCompute: awsComputeCost,
       blockchainGas: blockchainGasCost,
       labor: laborCost,
+      heartbeatLabor: heartbeat.weeklyLaborCost,
+      heartbeatCompute: heartbeat.weeklyComputeCost,
+      heartbeatBlockchain: heartbeat.weeklyBlockchainCost,
       total: totalCost,
     },
     timeline: {
@@ -340,6 +402,7 @@ function buildCalculationResult({
       peoplePerWeek,
     },
     distribution,
+    heartbeat,
   };
 }
 
@@ -428,6 +491,15 @@ function printResult(result: CalculationResult) {
     `    Labor:          ${formatCurrency(result.costBreakdown.labor)}`,
   );
   console.log(
+    `    Heartbeat Labor: ${formatCurrency(result.costBreakdown.heartbeatLabor)}`,
+  );
+  console.log(
+    `    Heartbeat CPU:   ${formatCurrency(result.costBreakdown.heartbeatCompute)}`,
+  );
+  console.log(
+    `    Heartbeat Gas:   ${formatCurrency(result.costBreakdown.heartbeatBlockchain)}`,
+  );
+  console.log(
     "  ───────────────────────────────────────────────────",
   );
   console.log(
@@ -455,6 +527,32 @@ function printResult(result: CalculationResult) {
   console.log(
     "═══════════════════════════════════════════════════\n",
   );
+
+  console.log("  Heartbeat Maintenance:");
+  console.log(
+    `    Properties Covered: ${formatNumber(result.heartbeat.properties, 0)}`,
+  );
+  console.log(
+    `    People Needed:      ${formatNumber(result.heartbeat.peopleNeeded, 0)}`,
+  );
+  console.log(
+    `    Capitalized Cost:   ${formatCurrency(result.heartbeat.weeklyTotalCost)}`,
+  );
+  console.log(
+    `    Weekly Run-Rate:    ${formatCurrency(result.heartbeat.weeklyTotalCost)}`,
+  );
+  console.log(
+    `      Labor:            ${formatCurrency(result.heartbeat.weeklyLaborCost)}`,
+  );
+  console.log(
+    `      AWS Compute:      ${formatCurrency(result.heartbeat.weeklyComputeCost)}`,
+  );
+  console.log(
+    `      Blockchain Gas:   ${formatCurrency(result.heartbeat.weeklyBlockchainCost)}`,
+  );
+  console.log(
+    "═══════════════════════════════════════════════════\n",
+  );
 }
 
 function main() {
@@ -472,4 +570,10 @@ if (import.meta.main) {
   main();
 }
 
-export { parseCliArgs, type CliOptions };
+export {
+  parseCliArgs,
+  buildCalculationResult,
+  type CliOptions,
+  type CalculationResult,
+  type HeartbeatSummary,
+};

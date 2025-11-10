@@ -1,5 +1,5 @@
 import { test, expect, describe, mock } from "bun:test";
-import { parseCliArgs } from "./cli";
+import { parseCliArgs, buildCalculationResult } from "./cli";
 
 function withMockedArgv(argv: string[], fn: () => void) {
   const originalArgv = Bun.argv;
@@ -183,5 +183,29 @@ describe("CLI Argument Parsing", () => {
         },
       );
     });
+  });
+});
+
+describe("Heartbeat calculations", () => {
+  test("capitalizes first-week costs and reports run-rate", () => {
+    const result = buildCalculationResult({
+      properties: 10_000_000,
+      context: { startIndex: 0, dataGroup: { label: "County" } },
+    });
+
+    expect(result.heartbeat.peopleNeeded).toBe(2);
+    expect(result.costBreakdown.heartbeatLabor).toBe(5000);
+    expect(result.costBreakdown.heartbeatCompute).toBeCloseTo(3000);
+    expect(result.costBreakdown.heartbeatBlockchain).toBeCloseTo(13000);
+    expect(result.heartbeat.weeklyTotalCost).toBeCloseTo(21000);
+    expect(result.costBreakdown.total).toBeCloseTo(
+      result.costBreakdown.storage +
+        result.costBreakdown.awsCompute +
+        result.costBreakdown.blockchainGas +
+        result.costBreakdown.labor +
+        result.costBreakdown.heartbeatLabor +
+        result.costBreakdown.heartbeatCompute +
+        result.costBreakdown.heartbeatBlockchain,
+    );
   });
 });
